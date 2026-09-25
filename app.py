@@ -1,0 +1,272 @@
+import json
+import os
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+
+from store import ROLES, Store
+
+DATA_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "CekHarga")
+CONFIG = os.path.join(DATA_DIR, "config.json")
+FONT = "Segoe UI"
+
+
+def rupiah(n):
+    return "Rp " + f"{n:,}".replace(",", ".")
+
+
+# ---------- printing (ESC/POS raw, 58mm = 384 dots) ----------
+
+def list_printers():
+    try:
+        import win32print
+    except ImportError:
+        return []
+    flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
+    return [p[2] for p in win32print.EnumPrinters(flags)]
+
+
+def default_printer():
+    try:
+        import win32print
+        return win32print.GetDefaultPrinter()
+    except Exception:
+        return ""
+
+
+def label_bytes(name, price, barcode):
+    code = barcode.encode("ascii", "replace")
+    if code.isdigit() and len(code) % 2 == 0:  # Code C packs 2 digits per symbol
+        data = b"{C" + bytes(int(code[i:i + 2]) for i in range(0, len(code), 2))
+        symbols = len(code) // 2
+    else:
+        data, symbols = b"{B" + code, len(code)
+    width = 2 if (11 * (symbols + 2) + 13) * 2 <= 384 else 1
+    return b"".join([
+        b"\x1b@", b"\x1ba\x01",                                   # init, center
+        b"\x1bE\x01", name.encode("ascii", "replace"), b"\n", b"\x1bE\x00",
+        b"\x1d!\x11", rupiah(price).encode(), b"\n", b"\x1d!\x00",  # double size price
+        b"\x1dh\x50", b"\x1dw", bytes([width]), b"\x1dH\x02",      # height 80, width, numbers below
+        b"\x1dk\x49", bytes([len(data)]), data,                    # CODE128
+        b"\n\n\n\n", b"\x1dV\x42\x00",                             # feed + cut
+    ])
+
+
+def print_label(printer, name, price, barcode):
+    import win32print
+    h = win32print.OpenPrinter(printer)
+    try:
+        win32print.StartDocPrinter(h, 1, ("Label Harga", None, "RAW"))
+        win32print.StartPagePrinter(h)
+        win32print.WritePrinter(h, label_bytes(name, price, barcode))
+        win32print.EndPagePrinter(h)
+        win32print.EndDocPrinter(h)
+    finally:
+        win32print.ClosePrinter(h)
+
+
+def load_config():
+    try:
+        with open(CONFIG, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_config(cfg):
+    with open(CONFIG, "w", encoding="utf-8") as f:
+        json.dump(cfg, f)
+
+
+# ---------- GUI ----------
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Cek Harga")
+        self.geometry("900x560")
+        self.store = Store(DATA_DIR)
+        self.body = None
+        self.show_login()
+
+    def clear(self, nav=True):
+        if self.body:
+            self.body.destroy()
+        self.body = ttk.Frame(self, padding=20)
+        self.body.pack(fill="both", expand=True)
+        if nav and self.store.role:
+            bar = ttk.Frame(self.body)
+            bar.pack(fill="x", pady=(0, 20))
+            ttk.Label(bar, text=f"{self.store.user} ({self.store.role})").pack(side="left")
+            ttk.Button(bar, text="Logout", command=self.logout).pack(side="right")
+            if self.store.role == "admin":
+                for text, cmd in [("User", self.show_users), ("Update", self.show_update),
+                                  ("Printer", self.show_printer), ("Scanner", self.show_scanner)]:
+                    ttk.Button(bar, text=text, command=cmd).pack(side="right", padx=4)
+        return self.body
+
+    def logout(self):
+        self.store.logout()
+        self.show_login()
+
+    def form(self, title, fields, submit_text, on_submit):
+        f = self.clear(nav=False)
+        box = ttk.Frame(f)
+        box.place(relx=0.5, rely=0.4, anchor="center")
+        ttk.Label(box, text=title, font=(FONT, 20, "bold")).grid(columnspan=2, pady=(0, 16))
+        entries = []
+        for label, show in fields:
+            ttk.Label(box, text=label).grid(column=0, sticky="w", pady=4)
+            e = ttk.Entry(box, show=show, width=28)
+            e.grid(row=len(entries) + 1, column=1, pady=4)
+            entries.append(e)
+        err = ttk.Label(box, foreground="red")
+        err.grid(columnspan=2, pady=8)
+
+        def go(_=None):
+            msg = on_submit(*[e.get() for e in entries])
+            err.config(text=msg or "")
+
+        ttk.Button(box, text=submit_text, command=go).grid(columnspan=2)
+        for e in entries:
+            e.bind("<Return>", go)
+        entries[0].focus_set()
+
+    def show_login(self):
+        if not self.store.has_users():
+            return self.form("Buat Akun Admin",
+                             [("Username", ""), ("Password", "*"), ("Ulangi Password", "*")],
+                             "Buat", self.do_setup)
+        self.form("Login", [("Username", ""), ("Password", "*")], "Login", self.do_login)
+
+    def do_setup(self, user, pw, pw2):
+        user = user.strip()
+        if not user or not pw:
+            return "Username dan password wajib diisi"
+        if pw != pw2:
+            return "Password tidak sama"
+        self.store.setup(user, pw)
+        self.do_login(user, pw)
+
+    def do_login(self, user, pw):
+        try:
+            role = self.store.login(user.strip(), pw)
+        except Exception:
+            return "Database rusak atau tidak valid"
+        if not role:
+            return "Username atau password salah"
+        {"admin": self.show_update, "scanner": self.show_scanner, "printer": self.show_printer}[role]()
+
+    def scan_page(self, title, on_scan, extra=None):
+        f = self.clear()
+        ttk.Label(f, text=title, font=(FONT, 16, "bold")).pack()
+        if extra:
+            extra(f)
+        entry = ttk.Entry(f, font=(FONT, 18), justify="center")
+        entry.pack(fill="x", pady=12)
+        entry.focus_set()
+
+        def scan(_=None):
+            code = entry.get().strip()
+            entry.delete(0, "end")
+            if code:
+                on_scan(code, self.store.lookup(code))
+            entry.focus_set()
+
+        entry.bind("<Return>", scan)
+        return f
+
+    def show_scanner(self):
+        name = tk.StringVar(value="Silakan scan barcode")
+        price, code = tk.StringVar(), tk.StringVar()
+
+        def on_scan(barcode, item):
+            if item:
+                name.set(item[0]), price.set(rupiah(item[1])), code.set(barcode)
+            else:
+                name.set("Barang tidak ditemukan"), price.set(""), code.set(barcode)
+
+        f = self.scan_page("Cek Harga", on_scan)
+        ttk.Label(f, textvariable=name, font=(FONT, 28, "bold"), wraplength=820).pack(pady=(30, 10))
+        ttk.Label(f, textvariable=price, font=(FONT, 44, "bold"), foreground="#0a6").pack()
+        ttk.Label(f, textvariable=code, font=(FONT, 18)).pack(pady=10)
+
+    def show_printer(self):
+        cfg = load_config()
+        printer = tk.StringVar(value=cfg.get("printer") or default_printer())
+        status = tk.StringVar(value="Silakan scan barcode untuk mencetak")
+
+        def pick(f):
+            row = ttk.Frame(f)
+            row.pack(pady=8)
+            ttk.Label(row, text="Printer:").pack(side="left")
+            cb = ttk.Combobox(row, textvariable=printer, values=list_printers(), state="readonly", width=40)
+            cb.pack(side="left", padx=6)
+            cb.bind("<<ComboboxSelected>>", lambda _: save_config({**cfg, "printer": printer.get()}))
+
+        def on_scan(barcode, item):
+            if not item:
+                return status.set(f"Barang tidak ditemukan: {barcode}")
+            try:
+                print_label(printer.get(), item[0], item[1], barcode)
+                status.set(f"Tercetak: {item[0]}")
+            except Exception as e:
+                status.set(f"Gagal cetak: {e}")
+
+        f = self.scan_page("Cetak Label Harga", on_scan, pick)
+        ttk.Label(f, textvariable=status, font=(FONT, 20), wraplength=820).pack(pady=30)
+
+    def show_update(self):
+        f = self.clear()
+        ttk.Label(f, text="Update Daftar Barang", font=(FONT, 16, "bold")).pack()
+        ttk.Label(f, text="Format Excel (baris 1): Nama Barang | Harga | Barcode\n"
+                          "Impor akan MENGGANTI seluruh daftar barang lama.", justify="center").pack(pady=10)
+        count = tk.StringVar(value=f"Jumlah barang saat ini: {len(self.store.items)}")
+
+        def do_import():
+            path = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx")])
+            if not path or not messagebox.askyesno("Konfirmasi", "Ganti seluruh daftar barang?"):
+                return
+            try:
+                n = self.store.import_excel(path)
+            except Exception as e:
+                return messagebox.showerror("Impor gagal", str(e))
+            count.set(f"Jumlah barang saat ini: {n}")
+            messagebox.showinfo("Berhasil", f"{n} barang diimpor")
+
+        ttk.Button(f, text="Impor Excel...", command=do_import).pack(pady=10)
+        ttk.Label(f, textvariable=count, font=(FONT, 14)).pack()
+
+    def show_users(self):
+        f = self.clear()
+        ttk.Label(f, text="Kelola User", font=(FONT, 16, "bold")).pack()
+        tree = ttk.Treeview(f, columns=("role",), height=10)
+        tree.heading("#0", text="Username")
+        tree.heading("role", text="Role")
+        tree.pack(fill="x", pady=10)
+        for name, role in self.store.list_users():
+            tree.insert("", "end", iid=name, text=name, values=(role,))
+
+        form = ttk.Frame(f)
+        form.pack(pady=6)
+        user, pw = ttk.Entry(form, width=18), ttk.Entry(form, width=18, show="*")
+        role = ttk.Combobox(form, values=ROLES, state="readonly", width=10)
+        role.set("scanner")
+        for label, w in [("Username", user), ("Password", pw), ("Role", role)]:
+            ttk.Label(form, text=label).pack(side="left", padx=(8, 2))
+            w.pack(side="left")
+
+        def act(fn, *args):
+            try:
+                fn(*args)
+            except Exception as e:
+                return messagebox.showerror("Gagal", str(e))
+            self.show_users()
+
+        ttk.Button(form, text="Tambah", command=lambda: act(
+            self.store.add_user, user.get().strip(), pw.get(), role.get())).pack(side="left", padx=8)
+        ttk.Button(f, text="Hapus user terpilih", command=lambda: tree.selection() and messagebox.askyesno(
+            "Konfirmasi", f"Hapus {tree.selection()[0]}?") and act(self.store.delete_user, tree.selection()[0])).pack()
+
+
+if __name__ == "__main__":
+    App().mainloop()
