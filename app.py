@@ -1,6 +1,7 @@
 import json
 import os
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
 from barcode import Code128
@@ -86,6 +87,10 @@ class App(tk.Tk):
         super().__init__()
         self.title("Cek Harga")
         self.geometry("900x560")
+        try:
+            self.state("zoomed")  # maximized on Windows
+        except tk.TclError:
+            pass
         self.store = Store(DATA_DIR)
         self.body = None
         self.show_login()
@@ -180,25 +185,49 @@ class App(tk.Tk):
     def show_scanner(self):
         name = tk.StringVar(value="Silakan scan barcode")
         price, code = tk.StringVar(), tk.StringVar()
+        name_font, price_font = tkfont.Font(family=FONT, weight="bold"), tkfont.Font(family=FONT, weight="bold")
+        code_font = tkfont.Font(family=FONT)
 
-        def on_scan(barcode, item):
+        def fit(_=None):
+            """Scale text and barcode to the space left under the scan box."""
+            W, H = info.winfo_width(), info.winfo_height()
+            if W < 50 or H < 50:
+                return
+            # ponytail: ~0.6em per char estimate, good enough for Segoe UI; name may wrap to 2 lines
+            name_font.configure(size=-int(min(H * 0.15, 2 * W / (max(len(name.get()), 1) * 0.6))))
+            price_font.configure(size=-int(min(H * 0.25, W / (max(len(price.get()), 1) * 0.62))))
+            code_font.configure(size=-int(H * 0.06))
+            name_lbl.configure(wraplength=W)
+            cw, ch = int(W * 0.7), int(H * 0.2)
+            bars.configure(width=cw, height=ch)
             bars.delete("all")
-            if not item:
-                return name.set("Barang tidak ditemukan"), price.set(""), code.set(barcode)
-            name.set(item[0]), price.set(rupiah(item[1])), code.set(barcode)
-            modules = Code128(barcode).build()[0]
-            w = max(1, min(3, 560 // len(modules)))
-            x = (600 - w * len(modules)) // 2
+            if not price.get():
+                return
+            modules = Code128(code.get()).build()[0]
+            w = max(1, cw // len(modules))
+            x = (cw - w * len(modules)) // 2
             for i, m in enumerate(modules):
                 if m == "1":
-                    bars.create_rectangle(x + i * w, 10, x + (i + 1) * w, 110, fill="black", width=0)
+                    bars.create_rectangle(x + i * w, 0, x + (i + 1) * w, ch, fill="black", width=0)
+
+        def on_scan(barcode, item):
+            if item:
+                name.set(item[0]), price.set(rupiah(item[1])), code.set(barcode)
+            else:
+                name.set("Barang tidak ditemukan"), price.set(""), code.set(barcode)
+            fit()
 
         f = self.scan_page("Cek Harga", on_scan)
-        ttk.Label(f, textvariable=name, font=(FONT, 28, "bold"), wraplength=820).pack(pady=(30, 10))
-        ttk.Label(f, textvariable=price, font=(FONT, 44, "bold"), foreground="#0a6").pack()
-        bars = tk.Canvas(f, width=600, height=120, bg="white", highlightthickness=0)
-        bars.pack(pady=(10, 0))
-        ttk.Label(f, textvariable=code, font=(FONT, 18)).pack()
+        info = ttk.Frame(f)
+        info.pack(fill="both", expand=True)
+        info.pack_propagate(False)  # children resize to the frame, not the other way round
+        info.bind("<Configure>", fit)
+        name_lbl = ttk.Label(info, textvariable=name, font=name_font, justify="center")
+        name_lbl.pack(expand=True)
+        ttk.Label(info, textvariable=price, font=price_font, foreground="#0a6").pack(expand=True)
+        bars = tk.Canvas(info, bg="white", highlightthickness=0)
+        bars.pack()
+        ttk.Label(info, textvariable=code, font=code_font).pack(expand=True)
 
     def show_printer(self):
         cfg = load_config()
