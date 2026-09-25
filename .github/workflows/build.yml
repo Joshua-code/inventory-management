@@ -10,8 +10,16 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements.txt pyinstaller
       - run: python test_store.py
-      - run: pyinstaller --onefile --windowed --name CekHarga app.py
+      # excluded modules are never loaded by the app (checked); they only add size
+      - run: >
+          pyinstaller --onefile --windowed --name "Retail Price Tag Management"
+          --exclude-module PIL._avif --exclude-module PIL._webp --exclude-module PIL._imagingcms
+          --exclude-module PIL._imagingmath --exclude-module PIL._imagingmorph --exclude-module PIL.ImageQt
+          --exclude-module unittest --exclude-module pydoc --exclude-module email
+          --exclude-module http --exclude-module xmlrpc
+          app.py
+      - run: dir dist
       - uses: actions/upload-artifact@v4
         with:
-          name: CekHarga
-          path: dist/CekHarga.exe
+          name: Retail Price Tag Management
+          path: dist/Retail Price Tag Management.exe

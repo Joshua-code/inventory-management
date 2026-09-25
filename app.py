@@ -10,7 +10,8 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from store import ROLES, Store
 
-DATA_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "CekHarga")
+APP_NAME = "Retail Price Tag Management"
+DATA_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "RetailPriceTagManagement")
 CONFIG = os.path.join(DATA_DIR, "config.json")
 FONT = "Segoe UI"
 
@@ -42,6 +43,7 @@ def default_printer():
 LABEL_W = 384
 NAME_PX, PRICE_PX, CODE_PX = 30, 56, 22
 GAP_NAME_PRICE, GAP_PRICE_BARS, BARS_H = 16, 16, 80
+FEED_MM = 25  # blank paper fed after the label so it clears the tear bar
 
 
 def _font(size, bold=False):
@@ -86,14 +88,14 @@ def render_label(name, price, barcode):
     return img.crop((0, 0, LABEL_W, y + CODE_PX))
 
 
-def label_bytes(img, feed_mm):
+def label_bytes(img):
     """ESC/POS raster (GS v 0) in 128-row bands, then feed past the tear bar. No cut: no cutter."""
     bw = img.convert("L").point(lambda p: 255 if p < 128 else 0, "1")  # bit 1 = black dot
     out = [b"\x1b@"]
     for top in range(0, bw.height, 128):
         band = bw.crop((0, top, LABEL_W, min(top + 128, bw.height)))
         out += [b"\x1dv0\x00", struct.pack("<HH", LABEL_W // 8, band.height), band.tobytes()]
-    out.append(b"\x1bJ" + bytes([min(255, feed_mm * 8)]))
+    out.append(b"\x1bJ" + bytes([FEED_MM * 8]))
     return b"".join(out)
 
 
@@ -119,6 +121,7 @@ def load_config():
 
 
 def save_config(cfg):
+    os.makedirs(DATA_DIR, exist_ok=True)
     with open(CONFIG, "w", encoding="utf-8") as f:
         json.dump(cfg, f)
 
@@ -128,15 +131,14 @@ def save_config(cfg):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Cek Harga")
+        self.title(APP_NAME)
         self.geometry("900x560")
         try:
             self.state("zoomed")  # maximized on Windows
         except tk.TclError:
             pass
-        self.store = Store(DATA_DIR)
-        self.body = None
-        self.show_login()
+        self.store, self.alias, self.body = Store(""), None, None
+        self.show_databases()
 
     def clear(self, nav=True):
         if self.body:
@@ -149,6 +151,7 @@ class App(tk.Tk):
             who = ttk.Frame(bar)
             who.pack(side="left")
             ttk.Label(who, text=f"{self.store.user} ({self.store.role})").pack(anchor="w")
+            ttk.Label(who, text=f"Database: {self.alias}").pack(anchor="w")
             ttk.Label(who, text=f"File yg digunakan: {self.store.source or '-'}").pack(anchor="w")
             ttk.Button(bar, text="Logout", command=self.logout).pack(side="right")
             if self.store.role == "admin":
@@ -165,12 +168,13 @@ class App(tk.Tk):
         f = self.clear(nav=False)
         box = ttk.Frame(f)
         box.place(relx=0.5, rely=0.4, anchor="center")
-        ttk.Label(box, text=title, font=(FONT, 20, "bold")).grid(columnspan=2, pady=(0, 16))
+        ttk.Label(box, text=title, font=(FONT, 20, "bold")).grid(columnspan=2)
+        ttk.Label(box, text=f"Database: {self.alias}").grid(columnspan=2, pady=(0, 16))
         entries = []
         for label, show in fields:
             ttk.Label(box, text=label).grid(column=0, sticky="w", pady=4)
             e = ttk.Entry(box, show=show, width=28)
-            e.grid(row=len(entries) + 1, column=1, pady=4)
+            e.grid(row=len(entries) + 2, column=1, pady=4)
             entries.append(e)
         err = ttk.Label(box, foreground="red")
         err.grid(columnspan=2, pady=8)
@@ -180,12 +184,92 @@ class App(tk.Tk):
             err.config(text=msg or "")
 
         ttk.Button(box, text=submit_text, command=go).grid(columnspan=2)
+        ttk.Button(box, text="Ganti Database", command=self.show_databases).grid(columnspan=2, pady=(24, 0))
         for e in entries:
             e.bind("<Return>", go)
         entries[0].focus_set()
 
+    def show_databases(self):
+        """First page: pick (or create) the database file, saved under an alias."""
+        self.store.logout()
+        f = self.clear(nav=False)
+        cfg = load_config()
+        dbs = cfg.setdefault("databases", {})
+        ttk.Label(f, text="Pilih Database", font=(FONT, 20, "bold")).pack(pady=(0, 12))
+        tree = ttk.Treeview(f, columns=("path",), height=8)
+        tree.heading("#0", text="Alias")
+        tree.heading("path", text="Lokasi File")
+        tree.column("#0", width=220)
+        tree.column("path", width=620)
+        tree.pack(fill="x")
+        for a, p in sorted(dbs.items()):
+            tree.insert("", "end", iid=a, text=a, values=(p,))
+        if cfg.get("last") in dbs:
+            tree.selection_set(cfg["last"])
+            tree.focus(cfg["last"])
+        tree.focus_set()
+
+        def open_selected(_=None):
+            if tree.selection():
+                self.open_db(cfg, tree.selection()[0])
+
+        def remove():
+            if tree.selection() and messagebox.askyesno(
+                    "Konfirmasi", "Hapus dari daftar? (File database tidak ikut dihapus)"):
+                dbs.pop(tree.selection()[0])
+                save_config(cfg)
+                self.show_databases()
+
+        btns = ttk.Frame(f)
+        btns.pack(pady=8)
+        ttk.Button(btns, text="Buka", command=open_selected).pack(side="left", padx=4)
+        ttk.Button(btns, text="Hapus dari daftar", command=remove).pack(side="left", padx=4)
+        tree.bind("<Return>", open_selected)
+        tree.bind("<Double-1>", open_selected)
+
+        ttk.Label(f, text="Tambah Database", font=(FONT, 14, "bold")).pack(pady=(24, 6))
+        form = ttk.Frame(f)
+        form.pack()
+        alias, path = ttk.Entry(form, width=20), ttk.Entry(form, width=50)
+        for label, w in [("Alias", alias), ("Lokasi File", path)]:
+            ttk.Label(form, text=label).pack(side="left", padx=(8, 2))
+            w.pack(side="left")
+
+        def browse():
+            p = filedialog.asksaveasfilename(title="Pilih file database lama atau nama file baru",
+                                             defaultextension=".rptdb", confirmoverwrite=False,
+                                             filetypes=[("Database", "*.rptdb")])
+            if p:
+                path.delete(0, "end")
+                path.insert(0, p)
+
+        def add():
+            a, p = alias.get().strip(), path.get().strip()
+            if not a or not p:
+                return messagebox.showerror("Gagal", "Alias dan lokasi file wajib diisi")
+            if a in dbs:
+                return messagebox.showerror("Gagal", "Alias sudah dipakai")
+            dbs[a] = os.path.abspath(p)
+            save_config(cfg)
+            self.open_db(cfg, a)
+
+        ttk.Button(form, text="Browse...", command=browse).pack(side="left", padx=4)
+        ttk.Button(form, text="Simpan & Buka", command=add).pack(side="left", padx=4)
+
+    def open_db(self, cfg, alias):
+        path = cfg["databases"][alias]
+        if not os.path.exists(path):
+            if not os.path.isdir(os.path.dirname(path)):
+                return messagebox.showerror("Gagal", f"Folder tidak ditemukan:\n{os.path.dirname(path)}")
+            if not messagebox.askyesno("Database baru", f"File belum ada. Buat database baru di:\n{path}?"):
+                return
+        cfg["last"] = alias
+        save_config(cfg)
+        self.store, self.alias = Store(path), alias
+        self.show_login()
+
     def show_login(self):
-        if not self.store.has_users():
+        if not self.store.exists():
             return self.form("Buat Akun Admin",
                              [("Username", ""), ("Password", "*"), ("Ulangi Password", "*")],
                              "Buat", self.do_setup)
@@ -197,7 +281,10 @@ class App(tk.Tk):
             return "Username dan password wajib diisi"
         if pw != pw2:
             return "Password tidak sama"
-        self.store.setup(user, pw)
+        try:
+            self.store.setup(user, pw)
+        except (OSError, ValueError) as e:
+            return f"Gagal membuat database: {e}"
         self.do_login(user, pw)
 
     def do_login(self, user, pw):
@@ -278,17 +365,10 @@ class App(tk.Tk):
     def show_printer(self):
         cfg = load_config()
         printer = tk.StringVar(value=cfg.get("printer") or default_printer())
-        feed = tk.StringVar(value=str(cfg.get("feed_mm", 12)))
         status = tk.StringVar(value="Silakan scan barcode untuk mencetak")
 
-        def feed_mm():
-            try:
-                return max(0, min(30, int(feed.get())))
-            except ValueError:
-                return 12
-
-        def save(*_):
-            cfg.update(printer=printer.get(), feed_mm=feed_mm())
+        def save(_=None):
+            cfg["printer"] = printer.get()
             save_config(cfg)
 
         def pick(f):
@@ -298,11 +378,6 @@ class App(tk.Tk):
             cb = ttk.Combobox(row, textvariable=printer, values=list_printers(), state="readonly", width=40)
             cb.pack(side="left", padx=6)
             cb.bind("<<ComboboxSelected>>", save)
-            # ponytail: calibration knob, tear-bar distance differs per printer model
-            ttk.Label(row, text="Jarak bawah (mm):").pack(side="left", padx=(16, 0))
-            sp = ttk.Spinbox(row, textvariable=feed, from_=0, to=30, width=4, command=save)
-            sp.pack(side="left", padx=6)
-            sp.bind("<FocusOut>", save)
 
         def on_scan(barcode, item):
             if not item:
@@ -312,7 +387,7 @@ class App(tk.Tk):
             preview.image = ImageTk.PhotoImage(img)  # keep a reference or Tk drops it
             preview.configure(image=preview.image)
             try:
-                print_label(printer.get(), label_bytes(img, feed_mm()))
+                print_label(printer.get(), label_bytes(img))
                 status.set(f"Tercetak: {item[0]}")
             except Exception as e:
                 status.set(f"Gagal cetak: {e}")

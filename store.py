@@ -1,11 +1,13 @@
-"""Encrypted item store + users. No GUI, so it can be tested anywhere.
+"""Encrypted single-file database + users. No GUI, so it can be tested anywhere.
 
-The master key that encrypts items.enc is never stored in plain form: each user
-entry in users.json holds a copy wrapped with a key derived from that user's
-password (scrypt). username+role are the AES-GCM associated data, so editing a
-role in the file makes the login fail. Without a valid password the data is
-unreadable, even with the source code.
+File (.rptdb, JSON):
+  salt  - random, for username ids
+  keys  - {HMAC(salt, username): master key wrapped with scrypt(password), AAD=username}
+  data  - AES-256-GCM(master key, {"file", "items", "users": {username: role}})
+Usernames, roles and items are unreadable without a valid password, even with
+the source code; roles can't be edited because they live inside the encrypted data.
 """
+import hmac
 import json
 import os
 
@@ -21,8 +23,8 @@ def _kek(password, salt):
     return Scrypt(salt=salt, length=32, n=2**15, r=8, p=1).derive(password.encode())
 
 
-def _aad(username, role):
-    return f"{username}\0{role}".encode()
+def _id(doc, username):
+    return hmac.new(bytes.fromhex(doc["salt"]), username.encode(), "sha256").hexdigest()
 
 
 def _write(path, data):
@@ -78,99 +80,117 @@ def parse_excel(path):
 
 
 class Store:
-    def __init__(self, folder):
-        os.makedirs(folder, exist_ok=True)
-        self.users_path = os.path.join(folder, "users.json")
-        self.items_path = os.path.join(folder, "items.enc")
+    def __init__(self, path):
+        self.path = path
         self.logout()
 
     def logout(self):
         self.key = self.user = self.role = self.source = None
-        self.items = {}
+        self.items, self.users = {}, {}
 
-    def has_users(self):
-        return os.path.exists(self.users_path)
+    def exists(self):
+        return os.path.exists(self.path)
 
-    def _users(self):
-        if not self.has_users():
-            return {}
-        with open(self.users_path, encoding="utf-8") as f:
-            return json.load(f)
+    def _read(self):
+        try:
+            with open(self.path, "rb") as f:
+                doc = json.load(f)
+            if doc["app"] != "rptm" or not isinstance(doc["keys"], dict):
+                raise ValueError
+            _id(doc, ""), bytes.fromhex(doc["data"])
+        except (ValueError, KeyError, TypeError):
+            raise ValueError("Bukan file database yang valid") from None
+        return doc
 
-    def _save_users(self, users):
-        _write(self.users_path, json.dumps(users, indent=1).encode())
+    def _decrypt(self, doc, key):
+        blob = bytes.fromhex(doc["data"])
+        return json.loads(AESGCM(key).decrypt(blob[:12], blob[12:], None))
 
-    def _save_items(self, items, source):
-        """source = name of the imported Excel file, kept encrypted with the items."""
-        data = json.dumps({"file": source, "items": items}).encode()
+    def _save(self, doc, data):
         nonce = os.urandom(12)
-        _write(self.items_path, nonce + AESGCM(self.key).encrypt(nonce, data, None))
+        doc["data"] = (nonce + AESGCM(self.key).encrypt(nonce, json.dumps(data).encode(), None)).hex()
+        _write(self.path, json.dumps(doc).encode())
+        self.items, self.source, self.users = data["items"], data["file"], data["users"]
+
+    def _wrap(self, doc, username, password):
+        salt, nonce = os.urandom(16), os.urandom(12)
+        wrapped = AESGCM(_kek(password, salt)).encrypt(nonce, self.key, username.encode())
+        doc["keys"][_id(doc, username)] = {"salt": salt.hex(), "nonce": nonce.hex(), "key": wrapped.hex()}
 
     def setup(self, username, password):
-        """First run: new master key, first admin. Any old data becomes garbage."""
-        if self.has_users():
-            raise ValueError("Sudah ada user")
-        self.key, self.role = AESGCM.generate_key(256), "admin"
-        self._save_items({}, None)
-        self._put_user({}, username, password, "admin")
+        """New database file with a fresh master key and the first admin."""
+        if self.exists():
+            raise ValueError("Database sudah ada")
+        self.key = AESGCM.generate_key(256)
+        doc = {"app": "rptm", "v": 1, "salt": os.urandom(16).hex(), "keys": {}}
+        self._wrap(doc, username, password)
+        self._save(doc, {"file": None, "items": {}, "users": {username: "admin"}})
         self.logout()
 
     def login(self, username, password):
-        u = self._users().get(username)
-        if not u:
+        doc = self._read()
+        k = doc["keys"].get(_id(doc, username))
+        if not k:
             return None
         try:
-            kek = _kek(password, bytes.fromhex(u["salt"]))
-            key = AESGCM(kek).decrypt(bytes.fromhex(u["nonce"]), bytes.fromhex(u["key"]), _aad(username, u["role"]))
+            kek = _kek(password, bytes.fromhex(k["salt"]))
+            key = AESGCM(kek).decrypt(bytes.fromhex(k["nonce"]), bytes.fromhex(k["key"]), username.encode())
         except (InvalidTag, ValueError, KeyError):
             return None
-        self.key, self.user, self.role = key, username, u["role"]
-        if os.path.exists(self.items_path):
-            with open(self.items_path, "rb") as f:
-                blob = f.read()
-            data = json.loads(AESGCM(key).decrypt(blob[:12], blob[12:], None))
-            self.items, self.source = data.get("items", data), data.get("file")  # old files: bare items dict
-        return self.role
-
-    def _put_user(self, users, username, password, role):
-        salt, nonce = os.urandom(16), os.urandom(12)
-        wrapped = AESGCM(_kek(password, salt)).encrypt(nonce, self.key, _aad(username, role))
-        users[username] = {"role": role, "salt": salt.hex(), "nonce": nonce.hex(), "key": wrapped.hex()}
-        self._save_users(users)
+        data = self._decrypt(doc, key)
+        role = data["users"].get(username)
+        if role not in ROLES:  # deleted user
+            return None
+        self.key, self.user, self.role = key, username, role
+        self.items, self.source, self.users = data["items"], data["file"], data["users"]
+        return role
 
     def _require_admin(self):
         if self.role != "admin" or not self.key:
             raise PermissionError("Hanya admin")
 
+    def _update(self, change):
+        """Re-read the file first so changes saved from another laptop aren't lost."""
+        self._require_admin()
+        doc = self._read()
+        data = self._decrypt(doc, self.key)
+        change(doc, data)
+        self._save(doc, data)
+
     def add_user(self, username, password, role):
         self._require_admin()
-        users = self._users()
         if not username or not password:
             raise ValueError("Username dan password wajib diisi")
         if role not in ROLES:
             raise ValueError("Role tidak valid")
-        if username in users:
-            raise ValueError("Username sudah dipakai")
-        self._put_user(users, username, password, role)
+
+        def change(doc, data):
+            if username in data["users"]:
+                raise ValueError("Username sudah dipakai")
+            self._wrap(doc, username, password)
+            data["users"][username] = role
+
+        self._update(change)
 
     def delete_user(self, username):
         self._require_admin()
         if username == self.user:
             raise ValueError("Tidak bisa menghapus akun sendiri")
-        users = self._users()
-        users.pop(username, None)
-        self._save_users(users)
+
+        def change(doc, data):
+            data["users"].pop(username, None)
+            doc["keys"].pop(_id(doc, username), None)
+
+        self._update(change)
 
     def list_users(self):
         self._require_admin()
-        return sorted((name, u["role"]) for name, u in self._users().items())
+        return sorted(self.users.items())
 
     def import_excel(self, path):
         self._require_admin()
         items = parse_excel(path)  # raises before anything is replaced
-        source = os.path.basename(path)
-        self._save_items(items, source)
-        self.items, self.source = items, source
+        self._update(lambda doc, data: data.update(items=items, file=os.path.basename(path)))
         return len(items)
 
     def lookup(self, barcode):
