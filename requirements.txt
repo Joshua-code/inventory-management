@@ -1,3 +1,4 @@
 cryptography
 openpyxl
+python-barcode
 pywin32; sys_platform == "win32"

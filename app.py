@@ -3,6 +3,8 @@ import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from barcode import Code128
+
 from store import ROLES, Store
 
 DATA_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "CekHarga")
@@ -180,15 +182,23 @@ class App(tk.Tk):
         price, code = tk.StringVar(), tk.StringVar()
 
         def on_scan(barcode, item):
-            if item:
-                name.set(item[0]), price.set(rupiah(item[1])), code.set(barcode)
-            else:
-                name.set("Barang tidak ditemukan"), price.set(""), code.set(barcode)
+            bars.delete("all")
+            if not item:
+                return name.set("Barang tidak ditemukan"), price.set(""), code.set(barcode)
+            name.set(item[0]), price.set(rupiah(item[1])), code.set(barcode)
+            modules = Code128(barcode).build()[0]
+            w = max(1, min(3, 560 // len(modules)))
+            x = (600 - w * len(modules)) // 2
+            for i, m in enumerate(modules):
+                if m == "1":
+                    bars.create_rectangle(x + i * w, 10, x + (i + 1) * w, 110, fill="black", width=0)
 
         f = self.scan_page("Cek Harga", on_scan)
         ttk.Label(f, textvariable=name, font=(FONT, 28, "bold"), wraplength=820).pack(pady=(30, 10))
         ttk.Label(f, textvariable=price, font=(FONT, 44, "bold"), foreground="#0a6").pack()
-        ttk.Label(f, textvariable=code, font=(FONT, 18)).pack(pady=10)
+        bars = tk.Canvas(f, width=600, height=120, bg="white", highlightthickness=0)
+        bars.pack(pady=(10, 0))
+        ttk.Label(f, textvariable=code, font=(FONT, 18)).pack()
 
     def show_printer(self):
         cfg = load_config()
