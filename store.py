@@ -86,7 +86,7 @@ class Store:
         self.logout()
 
     def logout(self):
-        self.key = self.user = self.role = None
+        self.key = self.user = self.role = self.source = None
         self.items = {}
 
     def has_users(self):
@@ -101,16 +101,18 @@ class Store:
     def _save_users(self, users):
         _write(self.users_path, json.dumps(users, indent=1).encode())
 
-    def _save_items(self, items):
+    def _save_items(self, items, source):
+        """source = name of the imported Excel file, kept encrypted with the items."""
+        data = json.dumps({"file": source, "items": items}).encode()
         nonce = os.urandom(12)
-        _write(self.items_path, nonce + AESGCM(self.key).encrypt(nonce, json.dumps(items).encode(), None))
+        _write(self.items_path, nonce + AESGCM(self.key).encrypt(nonce, data, None))
 
     def setup(self, username, password):
         """First run: new master key, first admin. Any old data becomes garbage."""
         if self.has_users():
             raise ValueError("Sudah ada user")
         self.key, self.role = AESGCM.generate_key(256), "admin"
-        self._save_items({})
+        self._save_items({}, None)
         self._put_user({}, username, password, "admin")
         self.logout()
 
@@ -127,7 +129,8 @@ class Store:
         if os.path.exists(self.items_path):
             with open(self.items_path, "rb") as f:
                 blob = f.read()
-            self.items = json.loads(AESGCM(key).decrypt(blob[:12], blob[12:], None))
+            data = json.loads(AESGCM(key).decrypt(blob[:12], blob[12:], None))
+            self.items, self.source = data.get("items", data), data.get("file")  # old files: bare items dict
         return self.role
 
     def _put_user(self, users, username, password, role):
@@ -166,8 +169,9 @@ class Store:
     def import_excel(self, path):
         self._require_admin()
         items = parse_excel(path)  # raises before anything is replaced
-        self._save_items(items)
-        self.items = items
+        source = os.path.basename(path)
+        self._save_items(items, source)
+        self.items, self.source = items, source
         return len(items)
 
     def lookup(self, barcode):

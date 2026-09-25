@@ -21,7 +21,7 @@ assert not s.has_users()
 s.setup("admin", "rahasia")
 assert s.role is None and s.login("admin", "salah") is None
 assert s.login("admin", "rahasia") == "admin"
-assert s.import_excel(xlsx) == 2
+assert s.import_excel(xlsx) == 2 and s.source == "barang.xlsx"
 assert s.lookup("8998866200301") == ["Indomie Goreng", 3500]
 assert s.lookup(" ABC-1 ") == ["Aqua 600ml", 4000]
 s.add_user("kasir", "123", "scanner")
@@ -34,12 +34,12 @@ try:
     raise AssertionError("bad excel accepted")
 except ValueError as e:
     assert "Baris 5" in str(e)
-assert s.lookup("ABC-1")  # old data kept after failed import
+assert s.lookup("ABC-1") and s.source == "barang.xlsx"  # old data kept after failed import
 
 s.logout()
 s2 = Store(s.users_path.rsplit(os.sep, 1)[0])
 assert s2.login("kasir", "123") == "scanner"
-assert s2.lookup("8998866200301")
+assert s2.lookup("8998866200301") and s2.source == "barang.xlsx"
 try:
     s2.add_user("x", "x", "admin")
     raise AssertionError("scanner added user")

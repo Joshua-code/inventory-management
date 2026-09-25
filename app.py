@@ -103,7 +103,10 @@ class App(tk.Tk):
         if nav and self.store.role:
             bar = ttk.Frame(self.body)
             bar.pack(fill="x", pady=(0, 20))
-            ttk.Label(bar, text=f"{self.store.user} ({self.store.role})").pack(side="left")
+            who = ttk.Frame(bar)
+            who.pack(side="left")
+            ttk.Label(who, text=f"{self.store.user} ({self.store.role})").pack(anchor="w")
+            ttk.Label(who, text=f"File yg digunakan: {self.store.source or '-'}").pack(anchor="w")
             ttk.Button(bar, text="Logout", command=self.logout).pack(side="right")
             if self.store.role == "admin":
                 for text, cmd in [("User", self.show_users), ("Update", self.show_update),
@@ -259,7 +262,6 @@ class App(tk.Tk):
         ttk.Label(f, text="Update Daftar Barang", font=(FONT, 16, "bold")).pack()
         ttk.Label(f, text="Format Excel (baris 1): Nama Barang | Harga | Barcode\n"
                           "Impor akan MENGGANTI seluruh daftar barang lama.", justify="center").pack(pady=10)
-        count = tk.StringVar(value=f"Jumlah barang saat ini: {len(self.store.items)}")
 
         def do_import():
             path = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx")])
@@ -269,11 +271,11 @@ class App(tk.Tk):
                 n = self.store.import_excel(path)
             except Exception as e:
                 return messagebox.showerror("Impor gagal", str(e))
-            count.set(f"Jumlah barang saat ini: {n}")
             messagebox.showinfo("Berhasil", f"{n} barang diimpor")
+            self.show_update()  # refresh nav bar file name + count
 
         ttk.Button(f, text="Impor Excel...", command=do_import).pack(pady=10)
-        ttk.Label(f, textvariable=count, font=(FONT, 14)).pack()
+        ttk.Label(f, text=f"Jumlah barang saat ini: {len(self.store.items)}", font=(FONT, 14)).pack()
 
     def show_users(self):
         f = self.clear()
