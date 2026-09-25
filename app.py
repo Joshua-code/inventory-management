@@ -1,10 +1,12 @@
 import json
 import os
+import struct
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
 from barcode import Code128
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from store import ROLES, Store
 
@@ -36,31 +38,72 @@ def default_printer():
         return ""
 
 
-def label_bytes(name, price, barcode):
-    code = barcode.encode("ascii", "replace")
-    if code.isdigit() and len(code) % 2 == 0:  # Code C packs 2 digits per symbol
-        data = b"{C" + bytes(int(code[i:i + 2]) for i in range(0, len(code), 2))
-        symbols = len(code) // 2
-    else:
-        data, symbols = b"{B" + code, len(code)
-    width = 2 if (11 * (symbols + 2) + 13) * 2 <= 384 else 1
-    return b"".join([
-        b"\x1b@", b"\x1ba\x01",                                   # init, center
-        b"\x1bE\x01", name.encode("ascii", "replace"), b"\n", b"\x1bE\x00",
-        b"\x1d!\x11", rupiah(price).encode(), b"\n", b"\x1d!\x00",  # double size price
-        b"\x1dh\x50", b"\x1dw", bytes([width]), b"\x1dH\x02",      # height 80, width, numbers below
-        b"\x1dk\x49", bytes([len(data)]), data,                    # CODE128
-        b"\n\n\n\n", b"\x1dV\x42\x00",                             # feed + cut
-    ])
+# Label layout in printer dots (8 dots = 1 mm). Tweak here if the print looks off.
+LABEL_W = 384
+NAME_PX, PRICE_PX, CODE_PX = 30, 56, 22
+GAP_NAME_PRICE, GAP_PRICE_BARS, BARS_H = 16, 16, 80
 
 
-def print_label(printer, name, price, barcode):
+def _font(size, bold=False):
+    for name in (("arialbd.ttf", "Arial Bold.ttf") if bold else ("arial.ttf", "Arial.ttf")):
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            pass
+    return ImageFont.load_default(size)
+
+
+def _wrap(draw, text, font):
+    lines = []
+    for word in text.split():
+        if lines and draw.textlength(f"{lines[-1]} {word}", font=font) <= LABEL_W:
+            lines[-1] += f" {word}"
+        else:
+            lines.append(word)
+    return lines
+
+
+def render_label(name, price, barcode):
+    """The label exactly as printed; also used as the on-screen preview."""
+    img = Image.new("L", (LABEL_W, 1000), 255)
+    d = ImageDraw.Draw(img)
+    mid, y = LABEL_W // 2, 0
+    font = _font(NAME_PX, bold=True)
+    for line in _wrap(d, name, font):
+        d.text((mid, y), line, font=font, fill=0, anchor="mt")
+        y += NAME_PX + 4
+    y += GAP_NAME_PRICE
+    d.text((mid, y), rupiah(price), font=_font(PRICE_PX, bold=True), fill=0, anchor="mt")
+    y += PRICE_PX + GAP_PRICE_BARS
+    modules = Code128(barcode).build()[0]
+    w = max(1, min(3, LABEL_W // (len(modules) + 20)))  # keep ~10 modules quiet zone each side
+    x = (LABEL_W - w * len(modules)) // 2
+    for i, m in enumerate(modules):
+        if m == "1":
+            d.rectangle([x + i * w, y, x + (i + 1) * w - 1, y + BARS_H - 1], fill=0)
+    y += BARS_H + 4
+    d.text((mid, y), barcode, font=_font(CODE_PX), fill=0, anchor="mt")
+    return img.crop((0, 0, LABEL_W, y + CODE_PX))
+
+
+def label_bytes(img, feed_mm):
+    """ESC/POS raster (GS v 0) in 128-row bands, then feed past the tear bar. No cut: no cutter."""
+    bw = img.convert("L").point(lambda p: 255 if p < 128 else 0, "1")  # bit 1 = black dot
+    out = [b"\x1b@"]
+    for top in range(0, bw.height, 128):
+        band = bw.crop((0, top, LABEL_W, min(top + 128, bw.height)))
+        out += [b"\x1dv0\x00", struct.pack("<HH", LABEL_W // 8, band.height), band.tobytes()]
+    out.append(b"\x1bJ" + bytes([min(255, feed_mm * 8)]))
+    return b"".join(out)
+
+
+def print_label(printer, data):
     import win32print
     h = win32print.OpenPrinter(printer)
     try:
         win32print.StartDocPrinter(h, 1, ("Label Harga", None, "RAW"))
         win32print.StartPagePrinter(h)
-        win32print.WritePrinter(h, label_bytes(name, price, barcode))
+        win32print.WritePrinter(h, data)
         win32print.EndPagePrinter(h)
         win32print.EndDocPrinter(h)
     finally:
@@ -235,7 +278,18 @@ class App(tk.Tk):
     def show_printer(self):
         cfg = load_config()
         printer = tk.StringVar(value=cfg.get("printer") or default_printer())
+        feed = tk.StringVar(value=str(cfg.get("feed_mm", 12)))
         status = tk.StringVar(value="Silakan scan barcode untuk mencetak")
+
+        def feed_mm():
+            try:
+                return max(0, min(30, int(feed.get())))
+            except ValueError:
+                return 12
+
+        def save(*_):
+            cfg.update(printer=printer.get(), feed_mm=feed_mm())
+            save_config(cfg)
 
         def pick(f):
             row = ttk.Frame(f)
@@ -243,24 +297,35 @@ class App(tk.Tk):
             ttk.Label(row, text="Printer:").pack(side="left")
             cb = ttk.Combobox(row, textvariable=printer, values=list_printers(), state="readonly", width=40)
             cb.pack(side="left", padx=6)
-            cb.bind("<<ComboboxSelected>>", lambda _: save_config({**cfg, "printer": printer.get()}))
+            cb.bind("<<ComboboxSelected>>", save)
+            # ponytail: calibration knob, tear-bar distance differs per printer model
+            ttk.Label(row, text="Jarak bawah (mm):").pack(side="left", padx=(16, 0))
+            sp = ttk.Spinbox(row, textvariable=feed, from_=0, to=30, width=4, command=save)
+            sp.pack(side="left", padx=6)
+            sp.bind("<FocusOut>", save)
 
         def on_scan(barcode, item):
             if not item:
+                preview.configure(image="")
                 return status.set(f"Barang tidak ditemukan: {barcode}")
+            img = render_label(item[0], item[1], barcode)
+            preview.image = ImageTk.PhotoImage(img)  # keep a reference or Tk drops it
+            preview.configure(image=preview.image)
             try:
-                print_label(printer.get(), item[0], item[1], barcode)
+                print_label(printer.get(), label_bytes(img, feed_mm()))
                 status.set(f"Tercetak: {item[0]}")
             except Exception as e:
                 status.set(f"Gagal cetak: {e}")
 
         f = self.scan_page("Cetak Label Harga", on_scan, pick)
-        ttk.Label(f, textvariable=status, font=(FONT, 20), wraplength=820).pack(pady=30)
+        ttk.Label(f, textvariable=status, font=(FONT, 16), wraplength=820).pack(pady=(4, 10))
+        preview = tk.Label(f, bg="white", padx=12, pady=12, relief="solid", borderwidth=1)
+        preview.pack()
 
     def show_update(self):
         f = self.clear()
         ttk.Label(f, text="Update Daftar Barang", font=(FONT, 16, "bold")).pack()
-        ttk.Label(f, text="Format Excel (baris 1): Nama Barang | Harga | Barcode\n"
+        ttk.Label(f, text="Kolom Excel: Nama Barang | Harga | Barcode (header opsional)\n"
                           "Impor akan MENGGANTI seluruh daftar barang lama.", justify="center").pack(pady=10)
 
         def do_import():

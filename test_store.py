@@ -4,8 +4,8 @@ import tempfile
 
 import openpyxl
 
-from app import label_bytes
-from store import Store
+from app import label_bytes, render_label
+from store import Store, parse_excel
 
 d = tempfile.mkdtemp()
 xlsx = os.path.join(d, "barang.xlsx")
@@ -54,6 +54,17 @@ assert Store(os.path.dirname(s.users_path)).login("kasir", "123") is None
 
 assert b"Indomie" not in open(s.items_path, "rb").read()
 
-lb = label_bytes("Indomie Goreng", 3500, "8998866200301")
-assert b"Rp 3.500" in lb and b"\x1dk\x49" in lb
+# header is optional: no header -> row 1 is data; any header text (Harga not a number) -> skipped
+for first, n in [(["Teh Botol", 5000, "111"], 2), (["Nama", "Harga Jual", "Kode"], 1)]:
+    wb = openpyxl.Workbook()
+    wb.active.append(first)
+    wb.active.append(["Kopi", 2000, "222"])
+    p = os.path.join(d, "h.xlsx")
+    wb.save(p)
+    assert len(parse_excel(p)) == n, first
+
+img = render_label("Indomie Goreng Rasa Ayam Bawang Special", 125000, "8998866200301")
+lb = label_bytes(img, 12)
+assert img.width == 384 and lb.startswith(b"\x1b@") and b"\x1dv0\x00" in lb and lb.endswith(b"\x1bJ\x60")
+assert b"\x1dV" not in lb  # no cut command: printer has no cutter
 print("OK")

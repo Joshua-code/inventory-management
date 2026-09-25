@@ -15,7 +15,6 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 ROLES = ("admin", "scanner", "printer")
-HEADER = ["nama barang", "harga", "barcode"]
 
 
 def _kek(password, salt):
@@ -49,25 +48,25 @@ def _price(v):
 
 
 def parse_excel(path):
-    """Return {barcode: [name, price]}; raise ValueError with a readable message."""
+    """Columns A=Nama Barang, B=Harga, C=Barcode; row 1 is skipped as a header when
+    its Harga isn't a number. Return {barcode: [name, price]}; raise ValueError
+    with a readable message."""
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
-        rows = wb.active.iter_rows(values_only=True)
-        header = [str(c or "").strip().lower() for c in (next(rows, None) or [])][:3]
-        if header != HEADER:
-            raise ValueError("Header baris 1 harus: Nama Barang | Harga | Barcode")
         items = {}
-        for i, row in enumerate(rows, start=2):
+        for i, row in enumerate(wb.active.iter_rows(values_only=True), start=1):
             name, price, code = (list(row) + [None] * 3)[:3]
             name, code = str(name or "").strip(), _barcode(code)
             if not name and not code and price in (None, ""):
                 continue
-            if not name or not code:
-                raise ValueError(f"Baris {i}: Nama Barang dan Barcode wajib diisi")
             try:
                 price = _price(price)
             except ValueError:
+                if i == 1:
+                    continue  # header row
                 raise ValueError(f"Baris {i}: Harga harus angka") from None
+            if not name or not code:
+                raise ValueError(f"Baris {i}: Nama Barang dan Barcode wajib diisi")
             if code in items:
                 raise ValueError(f"Baris {i}: Barcode {code} duplikat")
             items[code] = [name, price]
