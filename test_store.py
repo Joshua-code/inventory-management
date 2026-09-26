@@ -3,7 +3,10 @@ import os
 import tempfile
 
 import openpyxl
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
+import licensing
 from app import label_bytes, render_label
 from store import Store, parse_excel
 
@@ -47,8 +50,11 @@ assert Store(path).login("tmp", "456") is None
 # exactly one file, nothing readable inside it
 assert os.listdir(db_dir) == ["toko.rptdb"]
 raw = open(path, "rb").read()
-for secret in [b"admin", b"kasir", b"scanner", b"Indomie", b"barang.xlsx", b"8998866200301"]:
+for secret in [b"admin", b"kasir", b"scanner", b"Indomie", b"8998866200301"]:
     assert secret not in raw, secret
+
+file, when = Store(path).info()  # readable before login
+assert file == "barang.xlsx" and when and Store(os.path.join(d, "none.rptdb")).info() == (None, None)
 
 s.logout()
 s2 = Store(path)
@@ -92,4 +98,14 @@ img = render_label("Indomie Goreng Rasa Ayam Bawang Special", 125000, "899886620
 lb = label_bytes(img)
 assert img.width == 384 and lb.startswith(b"\x1b@") and b"\x1dv0\x00" in lb and lb.endswith(b"\x1bJ\xc8")  # 25mm
 assert b"\x1dV" not in lb  # no cut command: printer has no cutter
+
+# license: code signed for device A works only on A
+k = Ed25519PrivateKey.generate()
+licensing.PUBLIC_KEY = k.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
+code = licensing.format_code(k.sign(b"AAAA-BBBB-CCCC-DDDD"))
+assert licensing.verify(code, "AAAA-BBBB-CCCC-DDDD")
+assert licensing.verify(" " + code.lower().replace("-", " ") + "\n", "AAAA-BBBB-CCCC-DDDD")
+assert not licensing.verify(code, "AAAA-BBBB-CCCC-DDDE")
+assert not licensing.verify("garbage", "AAAA-BBBB-CCCC-DDDD") and not licensing.verify("", "AAAA-BBBB-CCCC-DDDD")
+assert len(licensing.device_id()) == 19
 print("OK")

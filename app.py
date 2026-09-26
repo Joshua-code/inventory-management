@@ -8,11 +8,13 @@ from tkinter import filedialog, messagebox, ttk
 from barcode import Code128
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
+import licensing
 from store import ROLES, Store
 
 APP_NAME = "Retail Price Tag Management"
 DATA_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "RetailPriceTagManagement")
 CONFIG = os.path.join(DATA_DIR, "config.json")
+LICENSE = os.path.join(DATA_DIR, "license.txt")
 FONT = "Segoe UI"
 
 
@@ -120,6 +122,14 @@ def load_config():
         return {}
 
 
+def activated():
+    try:
+        with open(LICENSE, encoding="utf-8") as f:
+            return licensing.verify(f.read(), licensing.device_id())
+    except OSError:
+        return False
+
+
 def save_config(cfg):
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(CONFIG, "w", encoding="utf-8") as f:
@@ -138,7 +148,53 @@ class App(tk.Tk):
         except tk.TclError:
             pass
         self.store, self.alias, self.body = Store(""), None, None
-        self.show_databases()
+        self.start() if activated() else self.show_license()
+
+    def start(self):
+        """Straight to login for the last database (auto-open), else the picker."""
+        cfg = load_config()
+        dbs, last = cfg.get("databases", {}), cfg.get("last")
+        if cfg.get("auto_open", True) and last in dbs and os.path.exists(dbs[last]):
+            self.open_db(cfg, last)
+        else:
+            self.show_databases()
+
+    def show_license(self):
+        f = self.clear(nav=False)
+        box = ttk.Frame(f)
+        box.place(relx=0.5, rely=0.4, anchor="center")
+        dev = licensing.device_id()
+        ttk.Label(box, text="Aktivasi Lisensi", font=(FONT, 20, "bold")).pack()
+        ttk.Label(box, text="Kirim Device ID ini ke penyedia aplikasi untuk mendapatkan kode aktivasi.").pack(pady=(8, 12))
+        row = ttk.Frame(box)
+        row.pack()
+        e = ttk.Entry(row, font=(FONT, 16), justify="center", width=22)
+        e.insert(0, dev)
+        e.configure(state="readonly")
+        e.pack(side="left")
+
+        def copy():
+            self.clipboard_clear()
+            self.clipboard_append(dev)
+
+        ttk.Button(row, text="Salin", command=copy).pack(side="left", padx=6)
+        ttk.Label(box, text="Kode Aktivasi").pack(pady=(20, 4))
+        code = tk.Text(box, width=60, height=3, wrap="char", font=(FONT, 11))
+        code.pack()
+        code.focus_set()
+        err = ttk.Label(box, foreground="red")
+        err.pack(pady=8)
+
+        def activate():
+            c = code.get("1.0", "end").strip()
+            if not licensing.verify(c, dev):
+                return err.config(text="Kode aktivasi tidak valid untuk perangkat ini")
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(LICENSE, "w", encoding="utf-8") as fh:
+                fh.write(c)
+            self.start()
+
+        ttk.Button(box, text="Aktivasi", command=activate).pack()
 
     def clear(self, nav=True):
         if self.body:
@@ -169,12 +225,18 @@ class App(tk.Tk):
         box = ttk.Frame(f)
         box.place(relx=0.5, rely=0.4, anchor="center")
         ttk.Label(box, text=title, font=(FONT, 20, "bold")).grid(columnspan=2)
-        ttk.Label(box, text=f"Database: {self.alias}").grid(columnspan=2, pady=(0, 16))
+        ttk.Label(box, text=f"Database: {self.alias}").grid(columnspan=2)
+        try:
+            file, when = self.store.info()
+        except ValueError:
+            file = when = None
+        info = f"{file} (diimpor {when})" if file else "-"
+        ttk.Label(box, text=f"File yg digunakan: {info}").grid(columnspan=2, pady=(0, 16))
         entries = []
         for label, show in fields:
             ttk.Label(box, text=label).grid(column=0, sticky="w", pady=4)
             e = ttk.Entry(box, show=show, width=28)
-            e.grid(row=len(entries) + 2, column=1, pady=4)
+            e.grid(row=len(entries) + 3, column=1, pady=4)
             entries.append(e)
         err = ttk.Label(box, foreground="red")
         err.grid(columnspan=2, pady=8)
@@ -184,7 +246,16 @@ class App(tk.Tk):
             err.config(text=msg or "")
 
         ttk.Button(box, text=submit_text, command=go).grid(columnspan=2)
-        ttk.Button(box, text="Ganti Database", command=self.show_databases).grid(columnspan=2, pady=(24, 0))
+        cfg = load_config()
+        auto = tk.BooleanVar(value=cfg.get("auto_open", True))
+
+        def save_auto():
+            cfg["auto_open"] = auto.get()
+            save_config(cfg)
+
+        ttk.Checkbutton(box, text="Langsung buka database ini saat aplikasi dibuka", variable=auto,
+                        command=save_auto).grid(columnspan=2, pady=(16, 0))
+        ttk.Button(box, text="Ganti Database", command=self.show_databases).grid(columnspan=2, pady=(12, 0))
         for e in entries:
             e.bind("<Return>", go)
         entries[0].focus_set()

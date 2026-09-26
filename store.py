@@ -4,12 +4,14 @@ File (.rptdb, JSON):
   salt  - random, for username ids
   keys  - {HMAC(salt, username): master key wrapped with scrypt(password), AAD=username}
   data  - AES-256-GCM(master key, {"file", "items", "users": {username: role}})
+  file, imported - last imported Excel name + date, plain text so the login page can show it
 Usernames, roles and items are unreadable without a valid password, even with
 the source code; roles can't be edited because they live inside the encrypted data.
 """
 import hmac
 import json
 import os
+from datetime import datetime
 
 import openpyxl
 from cryptography.exceptions import InvalidTag
@@ -102,6 +104,13 @@ class Store:
             raise ValueError("Bukan file database yang valid") from None
         return doc
 
+    def info(self):
+        """(last imported file, import date) — readable before login."""
+        if not self.exists():
+            return None, None
+        doc = self._read()
+        return doc.get("file"), doc.get("imported")
+
     def _decrypt(self, doc, key):
         blob = bytes.fromhex(doc["data"])
         return json.loads(AESGCM(key).decrypt(blob[:12], blob[12:], None))
@@ -190,7 +199,13 @@ class Store:
     def import_excel(self, path):
         self._require_admin()
         items = parse_excel(path)  # raises before anything is replaced
-        self._update(lambda doc, data: data.update(items=items, file=os.path.basename(path)))
+        name = os.path.basename(path)
+
+        def change(doc, data):
+            data.update(items=items, file=name)
+            doc.update(file=name, imported=datetime.now().strftime("%d/%m/%Y %H:%M"))
+
+        self._update(change)
         return len(items)
 
     def lookup(self, barcode):
