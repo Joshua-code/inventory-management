@@ -4,3 +4,4 @@ dist/
 *.spec
 .venv/
 *.key
+.DS_Store
