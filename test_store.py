@@ -4,8 +4,9 @@ import tempfile
 
 import openpyxl
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 
+import keygen
 import licensing
 from app import label_bytes, render_label
 from store import Store, parse_excel
@@ -108,4 +109,22 @@ assert licensing.verify(" " + code.lower().replace("-", " ") + "\n", "AAAA-BBBB-
 assert not licensing.verify(code, "AAAA-BBBB-CCCC-DDDE")
 assert not licensing.verify("garbage", "AAAA-BBBB-CCCC-DDDD") and not licensing.verify("", "AAAA-BBBB-CCCC-DDDD")
 assert len(licensing.device_id()) == 19
+
+# generator: only the matching key file is accepted; ID format is checked
+raw = lambda key: key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())  # noqa: E731
+for name, data in [("good.key", raw(k)), ("other.key", raw(Ed25519PrivateKey.generate())), ("junk.key", b"x")]:
+    open(os.path.join(d, name), "wb").write(data)
+gk = keygen.load_key(os.path.join(d, "good.key"))
+for name in ["other.key", "junk.key"]:
+    try:
+        keygen.load_key(os.path.join(d, name))
+        raise AssertionError(name)
+    except ValueError:
+        pass
+assert licensing.verify(keygen.make_code(gk, "aaaabbbbccccdddd"), "AAAA-BBBB-CCCC-DDDD")
+try:
+    keygen.make_code(gk, "not-an-id")
+    raise AssertionError("bad id accepted")
+except ValueError:
+    pass
 print("OK")

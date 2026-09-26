@@ -18,8 +18,19 @@ jobs:
           --exclude-module unittest --exclude-module pydoc --exclude-module email
           --exclude-module http --exclude-module xmlrpc
           app.py
+      # developer-only tool; contains no private key (it reads the key file from the developer's laptop)
+      - run: >
+          pyinstaller --onefile --windowed --name "Retail Price Tag License Generator"
+          --exclude-module PIL --exclude-module openpyxl --exclude-module barcode
+          --exclude-module unittest --exclude-module pydoc --exclude-module email
+          --exclude-module http --exclude-module xmlrpc
+          keygen.py
       - run: dir dist
       - uses: actions/upload-artifact@v4
         with:
           name: Retail Price Tag Management
           path: dist/Retail Price Tag Management.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Retail Price Tag License Generator
+          path: dist/Retail Price Tag License Generator.exe
