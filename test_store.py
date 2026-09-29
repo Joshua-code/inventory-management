@@ -92,15 +92,15 @@ wb2 = openpyxl.Workbook()
 wb2.active.append(["Kopi Kapal Api", 1500, "555"])
 x2 = os.path.join(d, "baru.xlsx")
 wb2.save(x2)
-os.utime(path, (0, 0))  # make sure mtime differs even on coarse filesystems
 admin.import_excel(x2)
+os.utime(path, (100, 100))  # distinct mtime per write, even on coarse (Windows) clocks
 assert s2.reload_if_changed() is True and s2.lookup("555") == ["Kopi Kapal Api", 1500] and s2.source == "baru.xlsx"
 assert s2.reload_if_changed() is False
-os.utime(path, (1, 1))
 admin.set_perms("kasir", ["scanner", "printer"])
+os.utime(path, (101, 101))
 assert s2.reload_if_changed() and s2.perms == ["scanner", "printer"]
-os.utime(path, (2, 2))
 admin.delete_user("kasir")
+os.utime(path, (102, 102))
 try:
     s2.reload_if_changed()
     raise AssertionError("deleted user kept access")
