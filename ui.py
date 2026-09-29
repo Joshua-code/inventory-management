@@ -13,10 +13,10 @@ RED, RED_DARK = "#D6232A", "#A8181E"
 BG, SIDE, BORDER, TEXT, MUTED = "#FFFFFF", "#F5F6F8", "#E3E5E8", "#1F2937", "#6B7280"
 
 ICONS = {
-    "search": "", "print": "", "upload": "", "people": "",
-    "add": "", "adduser": "", "delete": "", "save": "",
-    "copy": "", "folder": "", "open": "", "switch": "",
-    "login": "", "logout": "", "key": "",
+    "search": "\uE721", "print": "\uE749", "upload": "\uE898", "people": "\uE716",
+    "add": "\uE710", "adduser": "\uE8FA", "delete": "\uE74D", "save": "\uE74E",
+    "copy": "\uE8C8", "folder": "\uE838", "open": "\uE8E5", "switch": "\uE8AB",
+    "login": "\uE72A", "logout": "\uE7E8", "key": "\uE8D7",
 }
 
 
