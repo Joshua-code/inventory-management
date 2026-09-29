@@ -125,6 +125,14 @@ def load_config():
         return {}
 
 
+LOGO_H = 40  # footer logo height in px; any size of assets/babelmart.png is scaled to this
+
+
+def logo_image(name, height):
+    img = Image.open(ui.asset(name))
+    return ImageTk.PhotoImage(img.resize((round(img.width * height / img.height), height), Image.LANCZOS))
+
+
 def activated():
     try:
         with open(LICENSE, encoding="utf-8") as f:
@@ -162,7 +170,7 @@ class App(tk.Tk):
         except tk.TclError:
             pass
         ui.header(self, APP_NAME, "app_28.png")
-        ui.footer(self, "babelmart.png")
+        ui.footer(self, logo_image("babelmart.png", LOGO_H))
         self.store, self.alias, self.body = Store(""), None, None
         self.updated = tk.StringVar()
         self.after(SYNC_MS, self.poll)

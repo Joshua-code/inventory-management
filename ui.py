@@ -95,7 +95,8 @@ def header(root, title, icon_png):
     tk.Label(bar, text=title, bg=RED, fg="white", font=(FONT, 15, "bold")).pack(side="left")
 
 
-def footer(root, logo_png=None):
+def footer(root, logo=None):
+    """logo: a ready PhotoImage (the app scales the Babel Mart logo with Pillow)."""
     bar = tk.Frame(root, bg=SIDE)
     bar.pack(side="bottom", fill="x")
     tk.Frame(bar, bg=BORDER, height=1).pack(fill="x")
@@ -103,8 +104,7 @@ def footer(root, logo_png=None):
     row.pack(fill="x", padx=16, pady=6)
     tk.Label(row, text="Dikembangkan oleh Joshua-code", bg=SIDE, fg=MUTED, font=(FONT, 9)).pack(side="left")
     tk.Label(row, text=f"© 2026 Babel Mart  ·  v{VERSION}", bg=SIDE, fg=MUTED, font=(FONT, 9)).pack(side="right")
-    if logo_png:
-        img = tk.PhotoImage(file=asset(logo_png))
-        logo = tk.Label(row, image=img, bg=SIDE)
-        logo.image = img
-        logo.pack(side="right", padx=10)
+    if logo:
+        label = tk.Label(row, image=logo, bg=SIDE)
+        label.image = logo  # keep a reference or Tk drops it
+        label.pack(side="right", padx=10)
