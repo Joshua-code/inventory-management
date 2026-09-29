@@ -55,8 +55,6 @@ jobs:
       - name: Sizes
         shell: pwsh
         run: Get-ChildItem dist -File | ForEach-Object { "{0,8:N1} MB  {1}" -f ($_.Length / 1MB), $_.Name }
-      - name: Icon font preview (temporary check)
-        run: python -c "from PIL import Image, ImageDraw, ImageFont; import ui; f = ImageFont.truetype('C:/Windows/Fonts/segmdl2.ttf', 28); names = list(ui.ICONS); im = Image.new('RGB', (130 * len(names), 70), 'white'); d = ImageDraw.Draw(im); [(d.text((130 * i + 50, 8), ui.ICONS[n], font=f, fill='black'), d.text((130 * i + 10, 50), n, fill='black')) for i, n in enumerate(names)]; im.save('dist/icons.png')"
       - uses: actions/upload-artifact@v4
         with:
           name: Retail Price Tag Management Setup
@@ -65,7 +63,3 @@ jobs:
         with:
           name: Retail Price Tag License Generator
           path: dist/Retail Price Tag License Generator.exe
-      - uses: actions/upload-artifact@v4
-        with:
-          name: icons-preview
-          path: dist/icons.png
