@@ -3,10 +3,10 @@
 File (.rptdb, JSON):
   salt  - random, for username ids
   keys  - {HMAC(salt, username): master key wrapped with scrypt(password), AAD=username}
-  data  - AES-256-GCM(master key, {"file", "items", "users": {username: role}})
+  data  - AES-256-GCM(master key, {"file", "items", "users": {username: [perms]}})
   file, imported - last imported Excel name + date, plain text so the login page can show it
-Usernames, roles and items are unreadable without a valid password, even with
-the source code; roles can't be edited because they live inside the encrypted data.
+Usernames, access rights and items are unreadable without a valid password, even
+with the source code; access can't be edited because it lives inside the encrypted data.
 """
 import hmac
 import json
@@ -18,7 +18,19 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
-ROLES = ("admin", "scanner", "printer")
+PERMS = ("scanner", "printer", "update", "users")
+PERM_LABELS = {"scanner": "Cek Harga", "printer": "Cetak Label", "update": "Update Barang", "users": "Kelola User"}
+_LEGACY = {"admin": list(PERMS), "scanner": ["scanner"], "printer": ["printer"]}  # pre-1.0 single roles
+
+
+class AccessRevoked(Exception):
+    pass
+
+
+def _perms(value):
+    if isinstance(value, str):
+        return _LEGACY.get(value, [])
+    return [p for p in PERMS if p in (value or [])]
 
 
 def _kek(password, salt):
@@ -87,8 +99,8 @@ class Store:
         self.logout()
 
     def logout(self):
-        self.key = self.user = self.role = self.source = None
-        self.items, self.users = {}, {}
+        self.key = self.user = self.source = self.mtime = None
+        self.items, self.users, self.perms = {}, {}, []
 
     def exists(self):
         return os.path.exists(self.path)
@@ -115,11 +127,17 @@ class Store:
         blob = bytes.fromhex(doc["data"])
         return json.loads(AESGCM(key).decrypt(blob[:12], blob[12:], None))
 
+    def _load(self, data):
+        self.items, self.source = data["items"], data["file"]
+        self.users = {name: _perms(v) for name, v in data["users"].items()}
+        self.perms = self.users.get(self.user, [])
+
     def _save(self, doc, data):
         nonce = os.urandom(12)
         doc["data"] = (nonce + AESGCM(self.key).encrypt(nonce, json.dumps(data).encode(), None)).hex()
         _write(self.path, json.dumps(doc).encode())
-        self.items, self.source, self.users = data["items"], data["file"], data["users"]
+        self.mtime = os.path.getmtime(self.path)
+        self._load(data)
 
     def _wrap(self, doc, username, password):
         salt, nonce = os.urandom(16), os.urandom(12)
@@ -127,16 +145,18 @@ class Store:
         doc["keys"][_id(doc, username)] = {"salt": salt.hex(), "nonce": nonce.hex(), "key": wrapped.hex()}
 
     def setup(self, username, password):
-        """New database file with a fresh master key and the first admin."""
+        """New database file with a fresh master key and the first user (all access)."""
         if self.exists():
             raise ValueError("Database sudah ada")
         self.key = AESGCM.generate_key(256)
         doc = {"app": "rptm", "v": 1, "salt": os.urandom(16).hex(), "keys": {}}
         self._wrap(doc, username, password)
-        self._save(doc, {"file": None, "items": {}, "users": {username: "admin"}})
+        self._save(doc, {"file": None, "items": {}, "users": {username: list(PERMS)}})
         self.logout()
 
     def login(self, username, password):
+        """Returns the user's access list, or None."""
+        mtime = os.path.getmtime(self.path)
         doc = self._read()
         k = doc["keys"].get(_id(doc, username))
         if not k:
@@ -147,42 +167,73 @@ class Store:
         except (InvalidTag, ValueError, KeyError):
             return None
         data = self._decrypt(doc, key)
-        role = data["users"].get(username)
-        if role not in ROLES:  # deleted user
+        if not _perms(data["users"].get(username)):  # deleted user
             return None
-        self.key, self.user, self.role = key, username, role
-        self.items, self.source, self.users = data["items"], data["file"], data["users"]
-        return role
+        self.key, self.user, self.mtime = key, username, mtime
+        self._load(data)
+        return self.perms
 
-    def _require_admin(self):
-        if self.role != "admin" or not self.key:
-            raise PermissionError("Hanya admin")
+    def reload_if_changed(self):
+        """Pick up a newer file (e.g. synced by Google Drive). True if reloaded.
+        Raises InvalidTag if the file was replaced by a different database."""
+        if not self.key:
+            return False
+        mtime = os.path.getmtime(self.path)
+        if mtime == self.mtime:
+            return False
+        data = self._decrypt(self._read(), self.key)
+        if not _perms(data["users"].get(self.user)):
+            self.logout()
+            raise AccessRevoked("Akses Anda telah dihapus. Silakan hubungi admin.")
+        self.mtime = mtime
+        self._load(data)
+        return True
 
-    def _update(self, change):
+    def _require(self, perm):
+        if not self.key or perm not in self.perms:
+            raise PermissionError(f"Tidak punya akses {PERM_LABELS[perm]}")
+
+    def _update(self, perm, change):
         """Re-read the file first so changes saved from another laptop aren't lost."""
-        self._require_admin()
+        self._require(perm)
         doc = self._read()
         data = self._decrypt(doc, self.key)
         change(doc, data)
         self._save(doc, data)
 
-    def add_user(self, username, password, role):
-        self._require_admin()
+    def add_user(self, username, password, perms):
+        self._require("users")
+        perms = _perms(perms)
         if not username or not password:
             raise ValueError("Username dan password wajib diisi")
-        if role not in ROLES:
-            raise ValueError("Role tidak valid")
+        if not perms:
+            raise ValueError("Pilih minimal satu akses")
 
         def change(doc, data):
             if username in data["users"]:
                 raise ValueError("Username sudah dipakai")
             self._wrap(doc, username, password)
-            data["users"][username] = role
+            data["users"][username] = perms
 
-        self._update(change)
+        self._update("users", change)
+
+    def set_perms(self, username, perms):
+        self._require("users")
+        perms = _perms(perms)
+        if not perms:
+            raise ValueError("Pilih minimal satu akses")
+        if username == self.user and "users" not in perms:
+            raise ValueError("Tidak bisa melepas akses Kelola User milik sendiri")
+
+        def change(doc, data):
+            if username not in data["users"]:
+                raise ValueError("User tidak ditemukan")
+            data["users"][username] = perms
+
+        self._update("users", change)
 
     def delete_user(self, username):
-        self._require_admin()
+        self._require("users")
         if username == self.user:
             raise ValueError("Tidak bisa menghapus akun sendiri")
 
@@ -190,14 +241,14 @@ class Store:
             data["users"].pop(username, None)
             doc["keys"].pop(_id(doc, username), None)
 
-        self._update(change)
+        self._update("users", change)
 
     def list_users(self):
-        self._require_admin()
+        self._require("users")
         return sorted(self.users.items())
 
     def import_excel(self, path):
-        self._require_admin()
+        self._require("update")
         items = parse_excel(path)  # raises before anything is replaced
         name = os.path.basename(path)
 
@@ -205,7 +256,7 @@ class Store:
             data.update(items=items, file=name)
             doc.update(file=name, imported=datetime.now().strftime("%d/%m/%Y %H:%M"))
 
-        self._update(change)
+        self._update("update", change)
         return len(items)
 
     def lookup(self, barcode):

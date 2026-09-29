@@ -1,21 +1,24 @@
+import errno
 import json
 import os
 import struct
 import tkinter as tk
 import tkinter.font as tkfont
+from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
 from barcode import Code128
+from cryptography.exceptions import InvalidTag
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 import licensing
-from store import ROLES, Store
+import ui
+from store import PERM_LABELS, PERMS, AccessRevoked, Store
 
 APP_NAME = "Retail Price Tag Management"
 DATA_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "RetailPriceTagManagement")
 CONFIG = os.path.join(DATA_DIR, "config.json")
 LICENSE = os.path.join(DATA_DIR, "license.txt")
-FONT = "Segoe UI"
 
 
 def rupiah(n):
@@ -138,16 +141,31 @@ def save_config(cfg):
 
 # ---------- GUI ----------
 
+SYNC_MS = 30_000  # how often to look for a newer database file (e.g. synced by Google Drive)
+NAV = [("scanner", "search"), ("printer", "print"), ("update", "upload"), ("users", "people")]
+LANDING = ("update", "scanner", "printer", "users")
+
+
+def error_text(e):
+    if isinstance(e, OSError) and e.errno in (errno.EACCES, errno.EPERM, errno.EROFS):
+        return "Database hanya-baca (dikelola pusat)"
+    return str(e)
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title(APP_NAME)
-        self.geometry("900x560")
+        ui.setup(self, APP_NAME, "app.ico")
+        self.geometry("1000x640")
         try:
             self.state("zoomed")  # maximized on Windows
         except tk.TclError:
             pass
+        ui.header(self, APP_NAME, "app_28.png")
+        ui.footer(self, "babelmart.png")
         self.store, self.alias, self.body = Store(""), None, None
+        self.updated = tk.StringVar()
+        self.after(SYNC_MS, self.poll)
         self.start() if activated() else self.show_license()
 
     def start(self):
@@ -159,16 +177,80 @@ class App(tk.Tk):
         else:
             self.show_databases()
 
+    def poll(self):
+        self.after(SYNC_MS, self.poll)
+        before = self.store.perms
+        try:
+            if not self.store.reload_if_changed():
+                return
+        except (InvalidTag, AccessRevoked) as e:
+            self.store.logout()
+            messagebox.showwarning("Database berubah", str(e) or "Database telah diganti. Silakan login lagi.")
+            return self.show_login()
+        except (OSError, ValueError):
+            return  # file is mid-sync (e.g. Drive still writing it): try again next round
+        self.updated.set(f"Diperbarui {datetime.now():%H:%M}")
+        if self.store.perms != before:
+            self.route()
+        else:
+            self.file_var.set(f"File: {self.store.source or '-'}")
+
+    # ----- layout -----
+
+    def clear(self, page=None):
+        """New page. With `page`, adds the sidebar and returns the content area."""
+        if self.body:
+            self.body.destroy()
+        self.body = ttk.Frame(self)
+        self.body.pack(fill="both", expand=True)
+        if not page:
+            return self.body
+        side = ttk.Frame(self.body, style="Side.TFrame", width=240, padding=12)
+        side.pack(side="left", fill="y")
+        side.pack_propagate(False)
+        for key, icon in NAV:
+            if key in self.store.perms:
+                ui.Button(side, PERM_LABELS[key], icon, getattr(self, f"show_{key}"),
+                          kind="nav_on" if key == page else "nav").pack(fill="x", pady=2)
+        info = ttk.Frame(side, style="Side.TFrame")
+        info.pack(side="bottom", fill="x")
+        ttk.Label(info, text=self.store.user, style="SideUser.TLabel").pack(anchor="w")
+        ttk.Label(info, text=", ".join(PERM_LABELS[p] for p in self.store.perms), style="Side.TLabel",
+                  wraplength=210).pack(anchor="w", pady=(0, 8))
+        self.file_var = tk.StringVar(value=f"File: {self.store.source or '-'}")
+        for kw in ({"text": f"Database: {self.alias}"}, {"textvariable": self.file_var},
+                   {"textvariable": self.updated}):
+            ttk.Label(info, style="Side.TLabel", wraplength=210, **kw).pack(anchor="w")
+        ui.Button(info, "Logout", "logout", self.logout).pack(fill="x", pady=(10, 0))
+        content = ttk.Frame(self.body, padding=28)
+        content.pack(side="left", fill="both", expand=True)
+        return content
+
+    def card(self):
+        box = ttk.Frame(self.clear(), style="Card.TFrame", padding=36)
+        box.place(relx=0.5, rely=0.45, anchor="center")
+        return box
+
+    def route(self):
+        for p in LANDING:
+            if p in self.store.perms:
+                return getattr(self, f"show_{p}")()
+
+    def logout(self):
+        self.store.logout()
+        self.show_login()
+
+    # ----- before login -----
+
     def show_license(self):
-        f = self.clear(nav=False)
-        box = ttk.Frame(f)
-        box.place(relx=0.5, rely=0.4, anchor="center")
+        box = self.card()
         dev = licensing.device_id()
-        ttk.Label(box, text="Aktivasi Lisensi", font=(FONT, 20, "bold")).pack()
-        ttk.Label(box, text="Kirim Device ID ini ke penyedia aplikasi untuk mendapatkan kode aktivasi.").pack(pady=(8, 12))
+        ttk.Label(box, text="Aktivasi Lisensi", style="Title.TLabel").pack()
+        ttk.Label(box, text="Kirim Device ID ini ke penyedia aplikasi untuk mendapatkan kode aktivasi.",
+                  style="Muted.TLabel").pack(pady=(6, 16))
         row = ttk.Frame(box)
         row.pack()
-        e = ttk.Entry(row, font=(FONT, 16), justify="center", width=22)
+        e = ttk.Entry(row, font=(ui.FONT, 16), justify="center", width=22)
         e.insert(0, dev)
         e.configure(state="readonly")
         e.pack(side="left")
@@ -177,12 +259,13 @@ class App(tk.Tk):
             self.clipboard_clear()
             self.clipboard_append(dev)
 
-        ttk.Button(row, text="Salin", command=copy).pack(side="left", padx=6)
+        ui.Button(row, "Salin", "copy", copy).pack(side="left", padx=8)
         ttk.Label(box, text="Kode Aktivasi").pack(pady=(20, 4))
-        code = tk.Text(box, width=60, height=3, wrap="char", font=(FONT, 11))
+        code = tk.Text(box, width=60, height=3, wrap="char", font=(ui.FONT, 11), relief="solid",
+                       borderwidth=1, highlightthickness=0)
         code.pack()
         code.focus_set()
-        err = ttk.Label(box, foreground="red")
+        err = ttk.Label(box, style="Error.TLabel")
         err.pack(pady=8)
 
         def activate():
@@ -194,84 +277,24 @@ class App(tk.Tk):
                 fh.write(c)
             self.start()
 
-        ttk.Button(box, text="Aktivasi", command=activate).pack()
-
-    def clear(self, nav=True):
-        if self.body:
-            self.body.destroy()
-        self.body = ttk.Frame(self, padding=20)
-        self.body.pack(fill="both", expand=True)
-        if nav and self.store.role:
-            bar = ttk.Frame(self.body)
-            bar.pack(fill="x", pady=(0, 20))
-            who = ttk.Frame(bar)
-            who.pack(side="left")
-            ttk.Label(who, text=f"{self.store.user} ({self.store.role})").pack(anchor="w")
-            ttk.Label(who, text=f"Database: {self.alias}").pack(anchor="w")
-            ttk.Label(who, text=f"File yg digunakan: {self.store.source or '-'}").pack(anchor="w")
-            ttk.Button(bar, text="Logout", command=self.logout).pack(side="right")
-            if self.store.role == "admin":
-                for text, cmd in [("User", self.show_users), ("Update", self.show_update),
-                                  ("Printer", self.show_printer), ("Scanner", self.show_scanner)]:
-                    ttk.Button(bar, text=text, command=cmd).pack(side="right", padx=4)
-        return self.body
-
-    def logout(self):
-        self.store.logout()
-        self.show_login()
-
-    def form(self, title, fields, submit_text, on_submit):
-        f = self.clear(nav=False)
-        box = ttk.Frame(f)
-        box.place(relx=0.5, rely=0.4, anchor="center")
-        ttk.Label(box, text=title, font=(FONT, 20, "bold")).grid(columnspan=2)
-        ttk.Label(box, text=f"Database: {self.alias}").grid(columnspan=2)
-        try:
-            file, when = self.store.info()
-        except ValueError:
-            file = when = None
-        info = f"{file} (diimpor {when})" if file else "-"
-        ttk.Label(box, text=f"File yg digunakan: {info}").grid(columnspan=2, pady=(0, 16))
-        entries = []
-        for label, show in fields:
-            ttk.Label(box, text=label).grid(column=0, sticky="w", pady=4)
-            e = ttk.Entry(box, show=show, width=28)
-            e.grid(row=len(entries) + 3, column=1, pady=4)
-            entries.append(e)
-        err = ttk.Label(box, foreground="red")
-        err.grid(columnspan=2, pady=8)
-
-        def go(_=None):
-            msg = on_submit(*[e.get() for e in entries])
-            err.config(text=msg or "")
-
-        ttk.Button(box, text=submit_text, command=go).grid(columnspan=2)
-        cfg = load_config()
-        auto = tk.BooleanVar(value=cfg.get("auto_open", True))
-
-        def save_auto():
-            cfg["auto_open"] = auto.get()
-            save_config(cfg)
-
-        ttk.Checkbutton(box, text="Langsung buka database ini saat aplikasi dibuka", variable=auto,
-                        command=save_auto).grid(columnspan=2, pady=(16, 0))
-        ttk.Button(box, text="Ganti Database", command=self.show_databases).grid(columnspan=2, pady=(12, 0))
-        for e in entries:
-            e.bind("<Return>", go)
-        entries[0].focus_set()
+        ui.Button(box, "Aktivasi", "key", activate, kind="primary").pack()
 
     def show_databases(self):
-        """First page: pick (or create) the database file, saved under an alias."""
+        """Pick (or create) the database file, saved under an alias."""
         self.store.logout()
-        f = self.clear(nav=False)
+        f = ttk.Frame(self.clear(), padding=(48, 32))
+        f.pack(fill="both", expand=True)
         cfg = load_config()
         dbs = cfg.setdefault("databases", {})
-        ttk.Label(f, text="Pilih Database", font=(FONT, 20, "bold")).pack(pady=(0, 12))
+        ttk.Label(f, text="Pilih Database", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(f, text="Pilih database tersimpan, atau tambahkan lokasi file baru "
+                          "(misalnya folder Google Drive yang dibagikan pusat).",
+                  style="Muted.TLabel").pack(anchor="w", pady=(4, 16))
         tree = ttk.Treeview(f, columns=("path",), height=8)
         tree.heading("#0", text="Alias")
         tree.heading("path", text="Lokasi File")
         tree.column("#0", width=220)
-        tree.column("path", width=620)
+        tree.column("path", width=640)
         tree.pack(fill="x")
         for a, p in sorted(dbs.items()):
             tree.insert("", "end", iid=a, text=a, values=(p,))
@@ -292,19 +315,19 @@ class App(tk.Tk):
                 self.show_databases()
 
         btns = ttk.Frame(f)
-        btns.pack(pady=8)
-        ttk.Button(btns, text="Buka", command=open_selected).pack(side="left", padx=4)
-        ttk.Button(btns, text="Hapus dari daftar", command=remove).pack(side="left", padx=4)
+        btns.pack(anchor="w", pady=10)
+        ui.Button(btns, "Buka", "open", open_selected, kind="primary").pack(side="left")
+        ui.Button(btns, "Hapus dari daftar", "delete", remove).pack(side="left", padx=8)
         tree.bind("<Return>", open_selected)
         tree.bind("<Double-1>", open_selected)
 
-        ttk.Label(f, text="Tambah Database", font=(FONT, 14, "bold")).pack(pady=(24, 6))
+        ttk.Label(f, text="Tambah Database", style="H2.TLabel").pack(anchor="w", pady=(24, 8))
         form = ttk.Frame(f)
-        form.pack()
-        alias, path = ttk.Entry(form, width=20), ttk.Entry(form, width=50)
+        form.pack(anchor="w")
+        alias, path = ttk.Entry(form, width=20), ttk.Entry(form, width=56)
         for label, w in [("Alias", alias), ("Lokasi File", path)]:
-            ttk.Label(form, text=label).pack(side="left", padx=(8, 2))
-            w.pack(side="left")
+            ttk.Label(form, text=label).pack(side="left", padx=(0, 6))
+            w.pack(side="left", padx=(0, 12))
 
         def browse():
             p = filedialog.asksaveasfilename(title="Pilih file database lama atau nama file baru",
@@ -324,8 +347,8 @@ class App(tk.Tk):
             save_config(cfg)
             self.open_db(cfg, a)
 
-        ttk.Button(form, text="Browse...", command=browse).pack(side="left", padx=4)
-        ttk.Button(form, text="Simpan & Buka", command=add).pack(side="left", padx=4)
+        ui.Button(form, "Browse", "folder", browse).pack(side="left")
+        ui.Button(form, "Simpan & Buka", "save", add, kind="primary").pack(side="left", padx=8)
 
     def open_db(self, cfg, alias):
         path = cfg["databases"][alias]
@@ -339,12 +362,51 @@ class App(tk.Tk):
         self.store, self.alias = Store(path), alias
         self.show_login()
 
+    def form(self, title, fields, submit_text, submit_icon, on_submit):
+        box = self.card()
+        ttk.Label(box, text=title, style="Title.TLabel").grid(columnspan=2)
+        ttk.Label(box, text=f"Database: {self.alias}", style="Muted.TLabel").grid(columnspan=2)
+        try:
+            file, when = self.store.info()
+        except ValueError:
+            file = when = None
+        info = f"{file} (diimpor {when})" if file else "-"
+        ttk.Label(box, text=f"File yg digunakan: {info}", style="Muted.TLabel").grid(columnspan=2, pady=(0, 20))
+        entries = []
+        for label, show in fields:
+            ttk.Label(box, text=label).grid(column=0, sticky="w", pady=5, padx=(0, 12))
+            e = ttk.Entry(box, show=show, width=30)
+            e.grid(row=len(entries) + 3, column=1, pady=5)
+            entries.append(e)
+        err = ttk.Label(box, style="Error.TLabel")
+        err.grid(columnspan=2, pady=8)
+
+        def go(_=None):
+            msg = on_submit(*[e.get() for e in entries])
+            if msg and err.winfo_exists():
+                err.config(text=msg)
+
+        ui.Button(box, submit_text, submit_icon, go, kind="primary").grid(columnspan=2, sticky="ew")
+        cfg = load_config()
+        auto = tk.BooleanVar(value=cfg.get("auto_open", True))
+
+        def save_auto():
+            cfg["auto_open"] = auto.get()
+            save_config(cfg)
+
+        ttk.Checkbutton(box, text="Langsung buka database ini saat aplikasi dibuka", variable=auto,
+                        command=save_auto).grid(columnspan=2, pady=(16, 0))
+        ui.Button(box, "Ganti Database", "switch", self.show_databases).grid(columnspan=2, pady=(10, 0))
+        for e in entries:
+            e.bind("<Return>", go)
+        entries[0].focus_set()
+
     def show_login(self):
         if not self.store.exists():
             return self.form("Buat Akun Admin",
                              [("Username", ""), ("Password", "*"), ("Ulangi Password", "*")],
-                             "Buat", self.do_setup)
-        self.form("Login", [("Username", ""), ("Password", "*")], "Login", self.do_login)
+                             "Buat", "add", self.do_setup)
+        self.form("Login", [("Username", ""), ("Password", "*")], "Masuk", "login", self.do_login)
 
     def do_setup(self, user, pw, pw2):
         user = user.strip()
@@ -355,24 +417,27 @@ class App(tk.Tk):
         try:
             self.store.setup(user, pw)
         except (OSError, ValueError) as e:
-            return f"Gagal membuat database: {e}"
-        self.do_login(user, pw)
+            return f"Gagal membuat database: {error_text(e)}"
+        return self.do_login(user, pw)
 
     def do_login(self, user, pw):
         try:
-            role = self.store.login(user.strip(), pw)
+            perms = self.store.login(user.strip(), pw)
         except Exception:
             return "Database rusak atau tidak valid"
-        if not role:
+        if not perms:
             return "Username atau password salah"
-        {"admin": self.show_update, "scanner": self.show_scanner, "printer": self.show_printer}[role]()
+        self.updated.set("")
+        self.route()
 
-    def scan_page(self, title, on_scan, extra=None):
-        f = self.clear()
-        ttk.Label(f, text=title, font=(FONT, 16, "bold")).pack()
+    # ----- pages -----
+
+    def scan_page(self, page, title, on_scan, extra=None):
+        f = self.clear(page)
+        ttk.Label(f, text=title, style="H2.TLabel").pack(anchor="w")
         if extra:
             extra(f)
-        entry = ttk.Entry(f, font=(FONT, 18), justify="center")
+        entry = ttk.Entry(f, font=(ui.FONT, 18), justify="center")
         entry.pack(fill="x", pady=12)
         entry.focus_set()
 
@@ -389,8 +454,8 @@ class App(tk.Tk):
     def show_scanner(self):
         name = tk.StringVar(value="Silakan scan barcode")
         price, code = tk.StringVar(), tk.StringVar()
-        name_font, price_font = tkfont.Font(family=FONT, weight="bold"), tkfont.Font(family=FONT, weight="bold")
-        code_font = tkfont.Font(family=FONT)
+        name_font, price_font = tkfont.Font(family=ui.FONT, weight="bold"), tkfont.Font(family=ui.FONT, weight="bold")
+        code_font = tkfont.Font(family=ui.FONT)
 
         def fit(_=None):
             """Scale text and barcode to the space left under the scan box."""
@@ -421,14 +486,14 @@ class App(tk.Tk):
                 name.set("Barang tidak ditemukan"), price.set(""), code.set(barcode)
             fit()
 
-        f = self.scan_page("Cek Harga", on_scan)
+        f = self.scan_page("scanner", "Cek Harga", on_scan)
         info = ttk.Frame(f)
         info.pack(fill="both", expand=True)
         info.pack_propagate(False)  # children resize to the frame, not the other way round
         info.bind("<Configure>", fit)
         name_lbl = ttk.Label(info, textvariable=name, font=name_font, justify="center")
         name_lbl.pack(expand=True)
-        ttk.Label(info, textvariable=price, font=price_font, foreground="#0a6").pack(expand=True)
+        ttk.Label(info, textvariable=price, font=price_font, foreground=ui.RED).pack(expand=True)
         bars = tk.Canvas(info, bg="white", highlightthickness=0)
         bars.pack()
         ttk.Label(info, textvariable=code, font=code_font).pack(expand=True)
@@ -444,10 +509,10 @@ class App(tk.Tk):
 
         def pick(f):
             row = ttk.Frame(f)
-            row.pack(pady=8)
-            ttk.Label(row, text="Printer:").pack(side="left")
+            row.pack(anchor="w", pady=(10, 0))
+            ttk.Label(row, text="Printer").pack(side="left")
             cb = ttk.Combobox(row, textvariable=printer, values=list_printers(), state="readonly", width=40)
-            cb.pack(side="left", padx=6)
+            cb.pack(side="left", padx=8)
             cb.bind("<<ComboboxSelected>>", save)
 
         def on_scan(barcode, item):
@@ -463,16 +528,17 @@ class App(tk.Tk):
             except Exception as e:
                 status.set(f"Gagal cetak: {e}")
 
-        f = self.scan_page("Cetak Label Harga", on_scan, pick)
-        ttk.Label(f, textvariable=status, font=(FONT, 16), wraplength=820).pack(pady=(4, 10))
+        f = self.scan_page("printer", "Cetak Label Harga", on_scan, pick)
+        ttk.Label(f, textvariable=status, font=(ui.FONT, 14), wraplength=820).pack(pady=(4, 12))
         preview = tk.Label(f, bg="white", padx=12, pady=12, relief="solid", borderwidth=1)
         preview.pack()
 
     def show_update(self):
-        f = self.clear()
-        ttk.Label(f, text="Update Daftar Barang", font=(FONT, 16, "bold")).pack()
-        ttk.Label(f, text="Kolom Excel: Nama Barang | Harga | Barcode (header opsional)\n"
-                          "Impor akan MENGGANTI seluruh daftar barang lama.", justify="center").pack(pady=10)
+        f = self.clear("update")
+        ttk.Label(f, text="Update Daftar Barang", style="H2.TLabel").pack(anchor="w")
+        ttk.Label(f, text="Kolom Excel: Nama Barang | Harga | Barcode (header opsional).\n"
+                          "Impor akan MENGGANTI seluruh daftar barang lama.",
+                  style="Muted.TLabel").pack(anchor="w", pady=(6, 16))
 
         def do_import():
             path = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx")])
@@ -481,43 +547,73 @@ class App(tk.Tk):
             try:
                 n = self.store.import_excel(path)
             except Exception as e:
-                return messagebox.showerror("Impor gagal", str(e))
+                return messagebox.showerror("Impor gagal", error_text(e))
             messagebox.showinfo("Berhasil", f"{n} barang diimpor")
-            self.show_update()  # refresh nav bar file name + count
+            self.show_update()  # refresh sidebar file name + count
 
-        ttk.Button(f, text="Impor Excel...", command=do_import).pack(pady=10)
-        ttk.Label(f, text=f"Jumlah barang saat ini: {len(self.store.items)}", font=(FONT, 14)).pack()
+        ui.Button(f, "Impor Excel", "upload", do_import, kind="primary").pack(anchor="w")
+        ttk.Label(f, text=f"Jumlah barang saat ini: {len(self.store.items)}",
+                  font=(ui.FONT, 13)).pack(anchor="w", pady=16)
 
     def show_users(self):
-        f = self.clear()
-        ttk.Label(f, text="Kelola User", font=(FONT, 16, "bold")).pack()
-        tree = ttk.Treeview(f, columns=("role",), height=10)
+        f = self.clear("users")
+        ttk.Label(f, text="Kelola User", style="H2.TLabel").pack(anchor="w")
+        tree = ttk.Treeview(f, columns=("perms",), height=9, selectmode="browse")
         tree.heading("#0", text="Username")
-        tree.heading("role", text="Role")
-        tree.pack(fill="x", pady=10)
-        for name, role in self.store.list_users():
-            tree.insert("", "end", iid=name, text=name, values=(role,))
+        tree.heading("perms", text="Akses")
+        tree.column("#0", width=200)
+        tree.column("perms", width=560)
+        tree.pack(fill="x", pady=12)
+        users = dict(self.store.list_users())
+        for name, perms in users.items():
+            tree.insert("", "end", iid=name, text=name, values=(", ".join(PERM_LABELS[p] for p in perms),))
 
         form = ttk.Frame(f)
-        form.pack(pady=6)
-        user, pw = ttk.Entry(form, width=18), ttk.Entry(form, width=18, show="*")
-        role = ttk.Combobox(form, values=ROLES, state="readonly", width=10)
-        role.set("scanner")
-        for label, w in [("Username", user), ("Password", pw), ("Role", role)]:
-            ttk.Label(form, text=label).pack(side="left", padx=(8, 2))
-            w.pack(side="left")
+        form.pack(anchor="w", pady=4)
+        user, pw = ttk.Entry(form, width=20), ttk.Entry(form, width=20, show="*")
+        for label, w in [("Username", user), ("Password", pw)]:
+            ttk.Label(form, text=label).pack(side="left", padx=(0, 6))
+            w.pack(side="left", padx=(0, 14))
+        checks = ttk.Frame(f)
+        checks.pack(anchor="w", pady=6)
+        ttk.Label(checks, text="Akses").pack(side="left", padx=(0, 8))
+        allowed = {p: tk.BooleanVar(value=p == "scanner") for p in PERMS}
+        for p in PERMS:
+            ttk.Checkbutton(checks, text=PERM_LABELS[p], variable=allowed[p]).pack(side="left", padx=(0, 10))
+
+        def chosen():
+            return [p for p in PERMS if allowed[p].get()]
+
+        def selected():
+            return tree.selection()[0] if tree.selection() else None
+
+        def on_select(_=None):
+            for p, v in allowed.items():
+                v.set(p in users.get(selected(), []))
+
+        tree.bind("<<TreeviewSelect>>", on_select)
 
         def act(fn, *args):
             try:
                 fn(*args)
             except Exception as e:
-                return messagebox.showerror("Gagal", str(e))
+                return messagebox.showerror("Gagal", error_text(e))
             self.show_users()
 
-        ttk.Button(form, text="Tambah", command=lambda: act(
-            self.store.add_user, user.get().strip(), pw.get(), role.get())).pack(side="left", padx=8)
-        ttk.Button(f, text="Hapus user terpilih", command=lambda: tree.selection() and messagebox.askyesno(
-            "Konfirmasi", f"Hapus {tree.selection()[0]}?") and act(self.store.delete_user, tree.selection()[0])).pack()
+        def delete():
+            name = selected()
+            if name and messagebox.askyesno("Konfirmasi", f"Hapus user {name}?"):
+                act(self.store.delete_user, name)
+
+        btns = ttk.Frame(f)
+        btns.pack(anchor="w", pady=10)
+        ui.Button(btns, "Tambah User", "adduser", lambda: act(
+            self.store.add_user, user.get().strip(), pw.get(), chosen()), kind="primary").pack(side="left")
+        ui.Button(btns, "Simpan Akses", "save",
+                  lambda: selected() and act(self.store.set_perms, selected(), chosen())).pack(side="left", padx=8)
+        ui.Button(btns, "Hapus User", "delete", delete).pack(side="left")
+        ttk.Label(f, text="Pilih user di tabel untuk mengubah akses atau menghapusnya.",
+                  style="Muted.TLabel").pack(anchor="w")
 
 
 if __name__ == "__main__":

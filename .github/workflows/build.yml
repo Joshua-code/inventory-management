@@ -3,34 +3,69 @@ on: [push, workflow_dispatch]
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      # never loaded by the apps; excluding them drops Python's own OpenSSL DLLs etc.
+      EXCLUDES: _hashlib _ssl ssl bz2 _bz2 lzma _lzma sqlite3 _sqlite3 unittest pydoc email http xmlrpc
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt pyinstaller
-      - run: python test_store.py
-      # excluded modules are never loaded by the app (checked); they only add size
-      - run: >
-          pyinstaller --onefile --windowed --name "Retail Price Tag Management"
-          --exclude-module PIL._avif --exclude-module PIL._webp --exclude-module PIL._imagingcms
-          --exclude-module PIL._imagingmath --exclude-module PIL._imagingmorph --exclude-module PIL.ImageQt
-          --exclude-module unittest --exclude-module pydoc --exclude-module email
-          --exclude-module http --exclude-module xmlrpc
-          app.py
-      # developer-only tool; contains no private key (it reads the key file from the developer's laptop)
-      - run: >
-          pyinstaller --onefile --windowed --name "Retail Price Tag License Generator"
-          --exclude-module PIL --exclude-module openpyxl --exclude-module barcode
-          --exclude-module unittest --exclude-module pydoc --exclude-module email
-          --exclude-module http --exclude-module xmlrpc
-          keygen.py
-      - run: dir dist
+      - name: Tests, with every excluded module blocked
+        run: python -c "import os, sys, runpy; [sys.modules.__setitem__(m, None) for m in os.environ['EXCLUDES'].split()]; runpy.run_path('test_store.py', run_name='__main__')"
+      - name: Build app (onedir) and license generator (onefile)
+        shell: pwsh
+        run: |
+          $ex = $env:EXCLUDES.Split(' ') | ForEach-Object { '--exclude-module', $_ }
+          $pil = 'PIL._avif','PIL._webp','PIL._imagingcms','PIL._imagingmath','PIL._imagingmorph','PIL.ImageQt' | ForEach-Object { '--exclude-module', $_ }
+          pyinstaller --noconfirm --onedir --windowed --name "Retail Price Tag Management" --icon assets/app.ico `
+            --add-data "assets/app.ico;assets" --add-data "assets/app_28.png;assets" --add-data "assets/babelmart.png;assets" `
+            @ex @pil app.py
+          if ($LASTEXITCODE) { exit 1 }
+          pyinstaller --noconfirm --onefile --windowed --name "Retail Price Tag License Generator" --icon assets/keygen.ico `
+            --add-data "assets/keygen.ico;assets" --add-data "assets/keygen_28.png;assets" `
+            --exclude-module PIL --exclude-module openpyxl --exclude-module barcode @ex keygen.py
+          if ($LASTEXITCODE) { exit 1 }
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) { choco install innosetup -y --no-progress; if ($LASTEXITCODE) { exit 1 } }
+          $v = python -c "import ui; print(ui.VERSION)"
+          & $iscc "/DMyVersion=$v" installer.iss
+          if ($LASTEXITCODE) { exit 1 }
+      - name: Install / uninstall check (database must survive)
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem "dist\*Setup*.exe")[0].FullName
+          Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          $app = "$env:LOCALAPPDATA\Programs\Retail Price Tag Management"
+          if (!(Test-Path "$app\Retail Price Tag Management.exe")) { throw "app not installed" }
+          $data = "$env:APPDATA\RetailPriceTagManagement"
+          New-Item -ItemType Directory -Force $data | Out-Null
+          Set-Content "$data\config.json" '{}'; Set-Content "$data\license.txt" 'x'; Set-Content "$data\inside.rptdb" 'db'
+          $outside = "$env:RUNNER_TEMP\outside.rptdb"; Set-Content $outside 'db'
+          Start-Process "$app\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          for ($i = 0; $i -lt 60 -and (Test-Path $app); $i++) { Start-Sleep 1 }  # uninstaller finishes from a temp copy
+          if (Test-Path $app) { throw "app folder not removed" }
+          if ((Test-Path "$data\config.json") -or (Test-Path "$data\license.txt")) { throw "settings not removed" }
+          if (!(Test-Path "$data\inside.rptdb") -or !(Test-Path $outside)) { throw "DATABASE WAS DELETED" }
+          "install/uninstall OK: app removed, settings removed, databases kept"
+      - name: Sizes
+        shell: pwsh
+        run: Get-ChildItem dist -File | ForEach-Object { "{0,8:N1} MB  {1}" -f ($_.Length / 1MB), $_.Name }
+      - name: Icon font preview (temporary check)
+        run: python -c "from PIL import Image, ImageDraw, ImageFont; import ui; f = ImageFont.truetype('C:/Windows/Fonts/segmdl2.ttf', 28); names = list(ui.ICONS); im = Image.new('RGB', (130 * len(names), 70), 'white'); d = ImageDraw.Draw(im); [(d.text((130 * i + 50, 8), ui.ICONS[n], font=f, fill='black'), d.text((130 * i + 10, 50), n, fill='black')) for i, n in enumerate(names)]; im.save('dist/icons.png')"
       - uses: actions/upload-artifact@v4
         with:
-          name: Retail Price Tag Management
-          path: dist/Retail Price Tag Management.exe
+          name: Retail Price Tag Management Setup
+          path: dist/*Setup*.exe
       - uses: actions/upload-artifact@v4
         with:
           name: Retail Price Tag License Generator
           path: dist/Retail Price Tag License Generator.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: icons-preview
+          path: dist/icons.png

@@ -64,10 +64,16 @@ def gui():
     import tkinter as tk
     from tkinter import filedialog, ttk
 
+    import ui
+
+    title = "Retail Price Tag License Generator"
     root = tk.Tk()
-    root.title("Retail Price Tag License Generator")
-    f = ttk.Frame(root, padding=20)
-    f.pack(fill="both", expand=True)
+    ui.setup(root, title, "keygen.ico")
+    root.geometry("720x560")
+    ui.header(root, title, "keygen_28.png")
+    ui.footer(root)
+    box = ttk.Frame(root, style="Card.TFrame", padding=32)
+    box.place(relx=0.5, rely=0.47, anchor="center")
     key_status, msg = tk.StringVar(), tk.StringVar()
     state = {"key": None}
 
@@ -111,20 +117,21 @@ def gui():
         root.clipboard_clear()
         root.clipboard_append(out.get("1.0", "end").strip())
 
-    ttk.Label(f, text="License Generator", font=("Segoe UI", 18, "bold")).pack()
-    ttk.Label(f, textvariable=key_status).pack(pady=(6, 0))
-    pick = ttk.Button(f, text="Pilih file kunci...", command=choose)
-    pick.pack(pady=4)
-    ttk.Label(f, text="Device ID").pack(pady=(16, 4))
-    device = ttk.Entry(f, font=("Segoe UI", 14), justify="center", width=24)
+    ttk.Label(box, text="Buat Kode Aktivasi", style="Title.TLabel").pack()
+    ttk.Label(box, textvariable=key_status, style="Muted.TLabel", wraplength=560).pack(pady=(6, 0))
+    pick = ui.Button(box, "Pilih file kunci", "folder", choose)
+    pick.pack(pady=6)
+    ttk.Label(box, text="Device ID").pack(pady=(16, 4))
+    device = ttk.Entry(box, font=(ui.FONT, 14), justify="center", width=24)
     device.pack()
     device.bind("<Return>", generate)
     device.focus_set()
-    ttk.Button(f, text="Buat Kode", command=generate).pack(pady=8)
-    ttk.Label(f, textvariable=msg, foreground="red").pack()
-    out = tk.Text(f, width=60, height=3, wrap="char", state="disabled")
-    out.pack(pady=4)
-    ttk.Button(f, text="Salin", command=copy).pack()
+    ui.Button(box, "Buat Kode", "key", generate, kind="primary").pack(pady=10)
+    ttk.Label(box, textvariable=msg, style="Error.TLabel").pack()
+    out = tk.Text(box, width=60, height=3, wrap="char", state="disabled", relief="solid", borderwidth=1,
+                  highlightthickness=0, font=(ui.FONT, 11))
+    out.pack(pady=6)
+    ui.Button(box, "Salin", "copy", copy).pack()
     refresh()
     return root
 
