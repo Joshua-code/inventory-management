@@ -6,7 +6,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 FONT = "Segoe UI"
 ICON_FONT = "Segoe MDL2 Assets"  # built into Windows 10/11; buttons fall back to text-only without it
 RED, RED_DARK = "#D6232A", "#A8181E"
