@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 
 import keygen
 import licensing
-from app import label_bytes, render_label
+from app import FILE_MAX, db_info_text, label_bytes, render_label
 from store import PERMS, AccessRevoked, Store, _perms, parse_excel
 
 d = tempfile.mkdtemp()
@@ -96,6 +96,8 @@ admin.import_excel(x2)
 os.utime(path, (100, 100))  # distinct mtime per write, even on coarse (Windows) clocks
 assert s2.reload_if_changed() is True and s2.lookup("555") == ["Kopi Kapal Api", 1500] and s2.source == "baru.xlsx"
 assert s2.reload_if_changed() is False
+file, when = Store(path).info()  # footer info follows the latest import
+assert file == "baru.xlsx" and when
 admin.set_perms("kasir", ["scanner", "printer"])
 os.utime(path, (101, 101))
 assert s2.reload_if_changed() and s2.perms == ["scanner", "printer"]
@@ -140,6 +142,13 @@ img = render_label("Indomie Goreng Rasa Ayam Bawang Special", 125000, "899886620
 lb = label_bytes(img)
 assert img.width == 384 and lb.startswith(b"\x1b@") and b"\x1dv0\x00" in lb and lb.endswith(b"\x1bJ\xc8")  # 25mm
 assert b"\x1dV" not in lb  # no cut command: printer has no cutter
+
+# footer: database file + import date; long names shortened, extension kept
+assert db_info_text(None, None) == ""
+assert db_info_text("barang.xlsx", "08/10/2026 15:18") == "File: barang.xlsx  ·  Diimpor 08/10/2026 15:18"
+long_name = "daftar_harga_barang_semua_cabang_babel_mart_oktober_2026_final.xlsx"
+short = db_info_text(long_name, "x").removeprefix("File: ").removesuffix("  ·  Diimpor x")
+assert len(short) == FILE_MAX and short.startswith("daftar_harga") and short.endswith("2026_final.xlsx") and "…" in short
 
 # license: code signed for device A works only on A
 k = Ed25519PrivateKey.generate()

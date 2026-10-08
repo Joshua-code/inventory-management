@@ -25,6 +25,18 @@ def rupiah(n):
     return "Rp " + f"{n:,}".replace(",", ".")
 
 
+FILE_MAX = 30  # longer Excel names are shortened in the footer so the bar never overflows
+
+
+def db_info_text(file, when):
+    """Footer text for the open database; long names keep their start and extension."""
+    if not file:
+        return ""
+    if len(file) > FILE_MAX:
+        file = file[:FILE_MAX - 16] + "…" + file[-15:]
+    return f"File: {file}  ·  Diimpor {when}"
+
+
 # ---------- printing (ESC/POS raw, 58mm = 384 dots) ----------
 
 def list_printers():
@@ -211,7 +223,7 @@ class App(tk.Tk):
             file, when = self.store.info()
         except (OSError, ValueError):
             return  # file is mid-sync: keep what's shown
-        self.db_info.set(f"File: {file}  ·  Diimpor {when}" if file else "")
+        self.db_info.set(db_info_text(file, when))
 
     def clear(self, page=None):
         """New page. With `page`, adds the sidebar and returns the content area."""
