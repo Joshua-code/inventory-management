@@ -202,8 +202,6 @@ class App(tk.Tk):
         self.show_db_info()
         if self.store.perms != before:
             self.route()
-        else:
-            self.file_var.set(f"File: {self.store.source or '-'}")
 
     # ----- layout -----
 
@@ -236,9 +234,7 @@ class App(tk.Tk):
         ttk.Label(info, text=self.store.user, style="SideUser.TLabel").pack(anchor="w")
         ttk.Label(info, text=", ".join(PERM_LABELS[p] for p in self.store.perms), style="Side.TLabel",
                   wraplength=210).pack(anchor="w", pady=(0, 8))
-        self.file_var = tk.StringVar(value=f"File: {self.store.source or '-'}")
-        for kw in ({"text": f"Database: {self.alias}"}, {"textvariable": self.file_var},
-                   {"textvariable": self.updated}):
+        for kw in ({"text": f"Database: {self.alias}"}, {"textvariable": self.updated}):
             ttk.Label(info, style="Side.TLabel", wraplength=210, **kw).pack(anchor="w")
         ui.Button(info, "Logout", "logout", self.logout).pack(fill="x", pady=(10, 0))
         content = ttk.Frame(self.body, padding=28)
@@ -568,7 +564,7 @@ class App(tk.Tk):
             except Exception as e:
                 return messagebox.showerror("Impor gagal", error_text(e))
             messagebox.showinfo("Berhasil", f"{n} barang diimpor")
-            self.show_update()  # refresh sidebar file name + count
+            self.show_update()  # refresh footer file info + count
 
         ui.Button(f, "Impor Excel", "upload", do_import, kind="primary").pack(anchor="w")
         ttk.Label(f, text=f"Jumlah barang saat ini: {len(self.store.items)}",
