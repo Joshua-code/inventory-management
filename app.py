@@ -25,6 +25,18 @@ def rupiah(n):
     return "Rp " + f"{n:,}".replace(",", ".")
 
 
+FILE_MAX = 30  # longer Excel names are shortened in the footer so the bar never overflows
+
+
+def db_info_text(file, when):
+    """Footer text for the open database; long names keep their start and extension."""
+    if not file:
+        return ""
+    if len(file) > FILE_MAX:
+        file = file[:FILE_MAX - 16] + "…" + file[-15:]
+    return f"File: {file}  ·  Diimpor {when}"
+
+
 # ---------- printing (ESC/POS raw, 58mm = 384 dots) ----------
 
 def list_printers():
@@ -170,7 +182,8 @@ class App(tk.Tk):
         except tk.TclError:
             pass
         ui.header(self, APP_NAME, "app_28.png")
-        ui.footer(self, logo_image("babelmart.png", LOGO_H))
+        self.db_info = tk.StringVar()
+        ui.footer(self, logo_image("babelmart.png", LOGO_H), self.db_info)
         self.store, self.alias, self.body = Store(""), None, None
         self.updated = tk.StringVar()
         self.after(SYNC_MS, self.poll)
@@ -198,15 +211,23 @@ class App(tk.Tk):
         except (OSError, ValueError):
             return  # file is mid-sync (e.g. Drive still writing it): try again next round
         self.updated.set(f"Diperbarui {datetime.now():%H:%M}")
+        self.show_db_info()
         if self.store.perms != before:
             self.route()
-        else:
-            self.file_var.set(f"File: {self.store.source or '-'}")
 
     # ----- layout -----
 
+    def show_db_info(self):
+        """Footer, bottom right: source Excel file and import date of the open database."""
+        try:
+            file, when = self.store.info()
+        except (OSError, ValueError):
+            return  # file is mid-sync: keep what's shown
+        self.db_info.set(db_info_text(file, when))
+
     def clear(self, page=None):
         """New page. With `page`, adds the sidebar and returns the content area."""
+        self.show_db_info()
         if self.body:
             self.body.destroy()
         self.body = ttk.Frame(self)
@@ -225,9 +246,7 @@ class App(tk.Tk):
         ttk.Label(info, text=self.store.user, style="SideUser.TLabel").pack(anchor="w")
         ttk.Label(info, text=", ".join(PERM_LABELS[p] for p in self.store.perms), style="Side.TLabel",
                   wraplength=210).pack(anchor="w", pady=(0, 8))
-        self.file_var = tk.StringVar(value=f"File: {self.store.source or '-'}")
-        for kw in ({"text": f"Database: {self.alias}"}, {"textvariable": self.file_var},
-                   {"textvariable": self.updated}):
+        for kw in ({"text": f"Database: {self.alias}"}, {"textvariable": self.updated}):
             ttk.Label(info, style="Side.TLabel", wraplength=210, **kw).pack(anchor="w")
         ui.Button(info, "Logout", "logout", self.logout).pack(fill="x", pady=(10, 0))
         content = ttk.Frame(self.body, padding=28)
@@ -289,7 +308,7 @@ class App(tk.Tk):
 
     def show_databases(self):
         """Pick (or create) the database file, saved under an alias."""
-        self.store.logout()
+        self.store, self.alias = Store(""), None
         f = ttk.Frame(self.clear(), padding=(48, 32))
         f.pack(fill="both", expand=True)
         cfg = load_config()
@@ -557,7 +576,7 @@ class App(tk.Tk):
             except Exception as e:
                 return messagebox.showerror("Impor gagal", error_text(e))
             messagebox.showinfo("Berhasil", f"{n} barang diimpor")
-            self.show_update()  # refresh sidebar file name + count
+            self.show_update()  # refresh footer file info + count
 
         ui.Button(f, "Impor Excel", "upload", do_import, kind="primary").pack(anchor="w")
         ttk.Label(f, text=f"Jumlah barang saat ini: {len(self.store.items)}",
