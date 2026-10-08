@@ -170,7 +170,8 @@ class App(tk.Tk):
         except tk.TclError:
             pass
         ui.header(self, APP_NAME, "app_28.png")
-        ui.footer(self, logo_image("babelmart.png", LOGO_H))
+        self.db_info = tk.StringVar()
+        ui.footer(self, logo_image("babelmart.png", LOGO_H), self.db_info)
         self.store, self.alias, self.body = Store(""), None, None
         self.updated = tk.StringVar()
         self.after(SYNC_MS, self.poll)
@@ -198,6 +199,7 @@ class App(tk.Tk):
         except (OSError, ValueError):
             return  # file is mid-sync (e.g. Drive still writing it): try again next round
         self.updated.set(f"Diperbarui {datetime.now():%H:%M}")
+        self.show_db_info()
         if self.store.perms != before:
             self.route()
         else:
@@ -205,8 +207,17 @@ class App(tk.Tk):
 
     # ----- layout -----
 
+    def show_db_info(self):
+        """Footer, bottom right: source Excel file and import date of the open database."""
+        try:
+            file, when = self.store.info()
+        except (OSError, ValueError):
+            return  # file is mid-sync: keep what's shown
+        self.db_info.set(f"File: {file}  ·  Diimpor {when}" if file else "")
+
     def clear(self, page=None):
         """New page. With `page`, adds the sidebar and returns the content area."""
+        self.show_db_info()
         if self.body:
             self.body.destroy()
         self.body = ttk.Frame(self)
@@ -289,7 +300,7 @@ class App(tk.Tk):
 
     def show_databases(self):
         """Pick (or create) the database file, saved under an alias."""
-        self.store.logout()
+        self.store, self.alias = Store(""), None
         f = ttk.Frame(self.clear(), padding=(48, 32))
         f.pack(fill="both", expand=True)
         cfg = load_config()

@@ -95,14 +95,17 @@ def header(root, title, icon_png):
     tk.Label(bar, text=title, bg=RED, fg="white", font=(FONT, 15, "bold")).pack(side="left")
 
 
-def footer(root, logo=None):
-    """logo: a ready PhotoImage (the app scales the Babel Mart logo with Pillow)."""
+def footer(root, logo=None, status=None):
+    """logo: a ready PhotoImage (the app scales the Babel Mart logo with Pillow).
+    status: a StringVar shown in the bottom-right corner (the app's database import info)."""
     bar = tk.Frame(root, bg=SIDE)
     bar.pack(side="bottom", fill="x")
     tk.Frame(bar, bg=BORDER, height=1).pack(fill="x")
     row = tk.Frame(bar, bg=SIDE)
     row.pack(fill="x", padx=16, pady=6)
     tk.Label(row, text="Dikembangkan oleh Joshua-code", bg=SIDE, fg=MUTED, font=(FONT, 9)).pack(side="left")
+    if status:
+        tk.Label(row, textvariable=status, bg=SIDE, fg=TEXT, font=(FONT, 9)).pack(side="right", padx=(16, 0))
     tk.Label(row, text=f"© 2026 Babel Mart  ·  v{VERSION}", bg=SIDE, fg=MUTED, font=(FONT, 9)).pack(side="right")
     if logo:
         label = tk.Label(row, image=logo, bg=SIDE)
