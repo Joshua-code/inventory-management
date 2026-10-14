@@ -1,4 +1,5 @@
 """Offline device license: activation code = Ed25519 signature of the Device ID.
+The same signature check also protects app updates (see updater.py).
 
 Only the public key is here; codes are made with keygen.py and the private key,
 which never leaves the developer's machine.
@@ -31,11 +32,16 @@ def format_code(sig):
     return "-".join(raw[i:i + 5] for i in range(0, len(raw), 5))
 
 
-def verify(code, device):
-    s = re.sub(r"[^A-Z2-7]", "", code.upper().replace("0", "O").replace("1", "I"))
+def verify_sig(sig_text, message):
+    """True if sig_text (base32, any spacing/case) is the developer's signature of message (bytes)."""
+    s = re.sub(r"[^A-Z2-7]", "", sig_text.upper().replace("0", "O").replace("1", "I"))
     try:
         sig = base64.b32decode(s + "=" * (-len(s) % 8))
-        Ed25519PublicKey.from_public_bytes(bytes.fromhex(PUBLIC_KEY)).verify(sig, device.encode())
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(PUBLIC_KEY)).verify(sig, message)
         return True
     except (ValueError, InvalidSignature):
         return False
+
+
+def verify(code, device):
+    return verify_sig(code, device.encode())

@@ -2,6 +2,7 @@ import errno
 import json
 import os
 import struct
+import subprocess
 import tkinter as tk
 import tkinter.font as tkfont
 from datetime import datetime
@@ -13,6 +14,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 import licensing
 import ui
+import updater
 from store import PERM_LABELS, PERMS, AccessRevoked, Store
 
 APP_NAME = "Retail Price Tag Management"
@@ -58,9 +60,33 @@ def default_printer():
 
 # Label layout in printer dots (8 dots = 1 mm). Tweak here if the print looks off.
 LABEL_W = 384
-NAME_PX, PRICE_PX, CODE_PX = 30, 56, 22
+DOTS_PER_MM = 8
+NAME_PX, PRICE_PX, CODE_PX, DATE_PX = 30, 56, 22, 16
 GAP_NAME_PRICE, GAP_PRICE_BARS, BARS_H = 16, 16, 80
-FEED_MM = 25  # blank paper fed after the label so it clears the tear bar
+DATE_INSET = 4  # px between the import date and the right edge
+MARGIN_MAX = 60
+DEFAULT_MARGINS = (0, 25)  # mm above / below the label; the bottom one must clear the tear bar
+
+
+def parse_margin(text):
+    try:
+        v = int(str(text).strip())
+    except ValueError:
+        raise ValueError("Margin harus berupa angka bulat (mm)") from None
+    if not 0 <= v <= MARGIN_MAX:
+        raise ValueError(f"Margin harus antara 0 dan {MARGIN_MAX} mm")
+    return v
+
+
+def saved_margins(cfg):
+    """(top, bottom) mm from the local config, falling back to the defaults for missing/bad values."""
+    out = []
+    for key, default in zip(("margin_top_mm", "margin_bottom_mm"), DEFAULT_MARGINS):
+        try:
+            out.append(parse_margin(cfg.get(key, default)))
+        except ValueError:
+            out.append(default)
+    return tuple(out)
 
 
 def _font(size, bold=False):
@@ -82,8 +108,9 @@ def _wrap(draw, text, font):
     return lines
 
 
-def render_label(name, price, barcode):
-    """The label exactly as printed; also used as the on-screen preview."""
+def render_label(name, price, barcode, imported=None):
+    """The label exactly as printed; also used as the on-screen preview.
+    imported: date of the last data import ('29/09/2026 09:50'), printed bottom-right of the barcode."""
     img = Image.new("L", (LABEL_W, 1000), 255)
     d = ImageDraw.Draw(img)
     mid, y = LABEL_W // 2, 0
@@ -101,18 +128,30 @@ def render_label(name, price, barcode):
         if m == "1":
             d.rectangle([x + i * w, y, x + (i + 1) * w - 1, y + BARS_H - 1], fill=0)
     y += BARS_H + 4
-    d.text((mid, y), barcode, font=_font(CODE_PX), fill=0, anchor="mt")
-    return img.crop((0, 0, LABEL_W, y + CODE_PX))
+    code_font = _font(CODE_PX)
+    d.text((mid, y), barcode, font=code_font, fill=0, anchor="mt")
+    bottom = y + CODE_PX
+    if imported:
+        date, date_font, right = imported.split()[0], _font(DATE_PX), LABEL_W - DATE_INSET
+        gap = right - d.textlength(date, font=date_font) - (mid + d.textlength(barcode, font=code_font) / 2)
+        if gap >= 8:  # same line as the barcode number, sharing its baseline
+            d.text((right, y + code_font.getmetrics()[0]), date, font=date_font, fill=0, anchor="rs")
+        else:  # long barcode number: date goes on its own line below
+            d.text((right, bottom + 2), date, font=date_font, fill=0, anchor="rt")
+            bottom += DATE_PX + 2
+    return img.crop((0, 0, LABEL_W, bottom))
 
 
-def label_bytes(img):
-    """ESC/POS raster (GS v 0) in 128-row bands, then feed past the tear bar. No cut: no cutter."""
-    bw = img.convert("L").point(lambda p: 255 if p < 128 else 0, "1")  # bit 1 = black dot
+def label_bytes(img, top_mm=0, bottom_mm=0):
+    """ESC/POS raster (GS v 0) in 128-row bands. The margins are blank rows in the image itself, so
+    they are the same on every 203-dpi 58 mm printer (a feed command's unit differs per model)."""
+    page = Image.new("L", (LABEL_W, img.height + (top_mm + bottom_mm) * DOTS_PER_MM), 255)
+    page.paste(img.convert("L"), (0, top_mm * DOTS_PER_MM))
+    bw = page.point(lambda p: 255 if p < 128 else 0, "1")  # bit 1 = black dot
     out = [b"\x1b@"]
     for top in range(0, bw.height, 128):
         band = bw.crop((0, top, LABEL_W, min(top + 128, bw.height)))
         out += [b"\x1dv0\x00", struct.pack("<HH", LABEL_W // 8, band.height), band.tobytes()]
-    out.append(b"\x1bJ" + bytes([FEED_MM * 8]))
     return b"".join(out)
 
 
@@ -186,6 +225,7 @@ class App(tk.Tk):
         ui.footer(self, logo_image("babelmart.png", LOGO_H), self.db_info)
         self.store, self.alias, self.body = Store(""), None, None
         self.updated = tk.StringVar()
+        self.update_info, self.update_slots = None, []  # newer Setup waiting in the database folder
         self.after(SYNC_MS, self.poll)
         self.start() if activated() else self.show_license()
 
@@ -198,8 +238,47 @@ class App(tk.Tk):
         else:
             self.show_databases()
 
+    def check_update(self):
+        """Look for a signed newer Setup in the folder of the open database (shared via Drive)."""
+        if not self.store.path:
+            return
+        info = updater.check(os.path.dirname(self.store.path), ui.VERSION)
+        if info != self.update_info:
+            self.update_info = info
+            for slot in self.update_slots:
+                if slot.winfo_exists():
+                    self.render_update(slot)
+
+    def update_slot(self, parent, style=None):
+        slot = ttk.Frame(parent, style=style) if style else ttk.Frame(parent)
+        self.update_slots.append(slot)
+        self.render_update(slot)
+        return slot
+
+    def render_update(self, slot):
+        for w in slot.winfo_children():
+            w.destroy()
+        if self.update_info:
+            ui.Button(slot, f"Update v{self.update_info['version']} tersedia", "download",
+                      self.do_update, kind="primary").pack(fill="x")
+
+    def do_update(self):
+        info = self.update_info
+        if not info or not messagebox.askyesno(
+                "Update", f"Pasang versi {info['version']}?\n\nAplikasi akan ditutup lalu dibuka lagi otomatis. "
+                          "Database, lisensi, dan pengaturan tidak berubah."):
+            return
+        try:
+            path = updater.prepare(info, os.path.dirname(self.store.path))
+            subprocess.Popen(updater.install_cmd(path), close_fds=True,
+                             creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+        except (OSError, ValueError) as e:
+            return messagebox.showerror("Update gagal", str(e))
+        self.destroy()
+
     def poll(self):
         self.after(SYNC_MS, self.poll)
+        self.check_update()
         before = self.store.perms
         try:
             if not self.store.reload_if_changed():
@@ -230,6 +309,7 @@ class App(tk.Tk):
         self.show_db_info()
         if self.body:
             self.body.destroy()
+        self.update_slots = []
         self.body = ttk.Frame(self)
         self.body.pack(fill="both", expand=True)
         if not page:
@@ -243,6 +323,7 @@ class App(tk.Tk):
                           kind="nav_on" if key == page else "nav").pack(fill="x", pady=2)
         info = ttk.Frame(side, style="Side.TFrame")
         info.pack(side="bottom", fill="x")
+        self.update_slot(info, "Side.TFrame").pack(fill="x", pady=(0, 10))
         ttk.Label(info, text=self.store.user, style="SideUser.TLabel").pack(anchor="w")
         ttk.Label(info, text=", ".join(PERM_LABELS[p] for p in self.store.perms), style="Side.TLabel",
                   wraplength=210).pack(anchor="w", pady=(0, 8))
@@ -387,6 +468,7 @@ class App(tk.Tk):
         cfg["last"] = alias
         save_config(cfg)
         self.store, self.alias = Store(path), alias
+        self.check_update()
         self.show_login()
 
     def form(self, title, fields, submit_text, submit_icon, on_submit):
@@ -424,6 +506,7 @@ class App(tk.Tk):
         ttk.Checkbutton(box, text="Langsung buka database ini saat aplikasi dibuka", variable=auto,
                         command=save_auto).grid(columnspan=2, pady=(16, 0))
         ui.Button(box, "Ganti Database", "switch", self.show_databases).grid(columnspan=2, pady=(10, 0))
+        self.update_slot(box).grid(columnspan=2, sticky="ew", pady=(10, 0))
         for e in entries:
             e.bind("<Return>", go)
         entries[0].focus_set()
@@ -525,37 +608,106 @@ class App(tk.Tk):
         bars.pack()
         ttk.Label(info, textvariable=code, font=code_font).pack(expand=True)
 
+    def printer_dialog(self, cfg, on_saved):
+        """Per-computer printer settings; saved in the local config.json, never in the database."""
+        dlg = tk.Toplevel(self)
+        dlg.title("Pengaturan Printer")
+        dlg.configure(bg=ui.BG)
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        dlg.geometry(f"+{self.winfo_rootx() + 160}+{self.winfo_rooty() + 120}")
+        f = ttk.Frame(dlg, padding=28)
+        f.pack()
+        top_mm, bottom_mm = saved_margins(cfg)
+        printer = tk.StringVar(value=cfg.get("printer") or default_printer())
+        top_var, bottom_var = tk.StringVar(value=str(top_mm)), tk.StringVar(value=str(bottom_mm))
+        ttk.Label(f, text="Pengaturan Printer", style="H2.TLabel").grid(columnspan=2, sticky="w", pady=(0, 14))
+        ttk.Label(f, text="Printer").grid(row=1, sticky="w", pady=6, padx=(0, 14))
+        ttk.Combobox(f, textvariable=printer, values=list_printers(), state="readonly", width=42).grid(row=1, column=1)
+        for row, (label, var) in enumerate([("Margin atas (mm)", top_var), ("Margin bawah (mm)", bottom_var)], 2):
+            ttk.Label(f, text=label).grid(row=row, sticky="w", pady=6, padx=(0, 14))
+            ttk.Spinbox(f, textvariable=var, from_=0, to=MARGIN_MAX, width=8).grid(row=row, column=1, sticky="w")
+        ttk.Label(f, text="Naikkan margin bawah jika barcode terlalu mepet saat disobek. Pengaturan ini "
+                          "hanya tersimpan di komputer ini, tidak di database.",
+                  style="Muted.TLabel", wraplength=420).grid(columnspan=2, sticky="w", pady=(10, 4))
+        msg = ttk.Label(f, wraplength=420)
+        msg.grid(columnspan=2, sticky="w", pady=4)
+
+        def say(text, ok=False):
+            msg.configure(text=text, foreground="#15803D" if ok else ui.RED)
+
+        def values():
+            return printer.get().strip(), parse_margin(top_var.get()), parse_margin(bottom_var.get())
+
+        def test():
+            try:
+                name, top, bottom = values()
+            except ValueError as e:
+                return say(str(e))
+            if not name:
+                return say("Pilih printer dulu")
+            sample = render_label("CONTOH BARANG", 12345, "8991234567890", datetime.now().strftime("%d/%m/%Y"))
+            try:
+                print_label(name, label_bytes(sample, top, bottom))
+            except Exception as e:
+                return say(f"Gagal cetak: {e}")
+            say("Label tes dikirim ke printer. Cek jarak di bawah barcode.", ok=True)
+
+        def save():
+            try:
+                name, top, bottom = values()
+            except ValueError as e:
+                return say(str(e))
+            cfg.update(printer=name, margin_top_mm=top, margin_bottom_mm=bottom)
+            try:
+                save_config(cfg)
+            except OSError as e:
+                return say(f"Gagal menyimpan: {e}")
+            dlg.destroy()
+            on_saved()
+
+        btns = ttk.Frame(f)
+        btns.grid(columnspan=2, sticky="w", pady=(10, 0))
+        ui.Button(btns, "Simpan", "save", save, kind="primary").pack(side="left")
+        ui.Button(btns, "Cetak Tes", "print", test).pack(side="left", padx=8)
+        ui.Button(btns, "Batal", None, dlg.destroy).pack(side="left")
+        dlg.grab_set()
+
     def show_printer(self):
         cfg = load_config()
-        printer = tk.StringVar(value=cfg.get("printer") or default_printer())
+        summary = tk.StringVar()
         status = tk.StringVar(value="Silakan scan barcode untuk mencetak")
 
-        def save(_=None):
-            cfg["printer"] = printer.get()
-            save_config(cfg)
+        def refresh():
+            top, bottom = saved_margins(cfg)
+            summary.set(f"Printer: {cfg.get('printer') or default_printer() or '-'}   ·   "
+                        f"Margin atas {top} mm   ·   bawah {bottom} mm")
 
-        def pick(f):
+        def head(f):
             row = ttk.Frame(f)
-            row.pack(anchor="w", pady=(10, 0))
-            ttk.Label(row, text="Printer").pack(side="left")
-            cb = ttk.Combobox(row, textvariable=printer, values=list_printers(), state="readonly", width=40)
-            cb.pack(side="left", padx=8)
-            cb.bind("<<ComboboxSelected>>", save)
+            row.pack(fill="x", pady=(10, 0))
+            ttk.Label(row, textvariable=summary, style="Muted.TLabel").pack(side="left")
+            ui.Button(row, "Pengaturan Printer", "settings",
+                      lambda: self.printer_dialog(cfg, refresh)).pack(side="right")
+            refresh()
 
         def on_scan(barcode, item):
             if not item:
                 preview.configure(image="")
                 return status.set(f"Barang tidak ditemukan: {barcode}")
-            img = render_label(item[0], item[1], barcode)
+            img = render_label(item[0], item[1], barcode, self.store.imported)
             preview.image = ImageTk.PhotoImage(img)  # keep a reference or Tk drops it
             preview.configure(image=preview.image)
+            printer = cfg.get("printer") or default_printer()
+            if not printer:
+                return status.set("Pilih printer di Pengaturan Printer")
             try:
-                print_label(printer.get(), label_bytes(img))
+                print_label(printer, label_bytes(img, *saved_margins(cfg)))
                 status.set(f"Tercetak: {item[0]}")
             except Exception as e:
                 status.set(f"Gagal cetak: {e}")
 
-        f = self.scan_page("printer", "Cetak Label Harga", on_scan, pick)
+        f = self.scan_page("printer", "Cetak Label Harga", on_scan, head)
         ttk.Label(f, textvariable=status, font=(ui.FONT, 14), wraplength=820).pack(pady=(4, 12))
         preview = tk.Label(f, bg="white", padx=12, pady=12, relief="solid", borderwidth=1)
         preview.pack()

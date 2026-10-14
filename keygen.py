@@ -4,6 +4,7 @@ The key is never bundled; the exe reads it from the developer's own laptop.
   (double-click / no args)               # GUI
   python keygen.py init                  # once: create private key, print public key for licensing.py
   python keygen.py XXXX-XXXX-XXXX-XXXX   # activation code for that Device ID
+  python keygen.py release "<Setup X.Y.Z.exe>"   # write the signed update.json next to a Setup
 """
 import os
 import re
@@ -13,6 +14,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import licensing
+import updater
 
 KEY_FILE = os.path.join(os.path.expanduser("~"), ".rptm", "license_private.key")
 
@@ -69,7 +71,7 @@ def gui():
     title = "Retail Price Tag License Generator"
     root = tk.Tk()
     ui.setup(root, title, "keygen.ico")
-    root.geometry("720x560")
+    root.geometry("720x780")
     ui.header(root, title, "keygen_28.png")
     ui.footer(root)
     box = ttk.Frame(root, style="Card.TFrame", padding=32)
@@ -132,6 +134,30 @@ def gui():
                   highlightthickness=0, font=(ui.FONT, 11))
     out.pack(pady=6)
     ui.Button(box, "Salin", "copy", copy).pack()
+
+    # ----- signed update.json for a new Setup -----
+    release_msg = tk.StringVar()
+
+    def release():
+        if not state["key"]:
+            return release_msg.set("Pilih file kunci dulu")
+        path = filedialog.askopenfilename(title="Pilih file Setup (… Setup X.Y.Z.exe)",
+                                          filetypes=[("Setup", "*.exe")])
+        if not path:
+            return
+        try:
+            out = updater.write_manifest(state["key"], path)
+        except (OSError, ValueError) as e:
+            return release_msg.set(f"Gagal: {e}")
+        release_msg.set(f"update.json dibuat di {os.path.dirname(out)}\n"
+                        "Salin file Setup dan update.json itu ke folder Google Drive tempat database berada.")
+
+    ttk.Separator(box).pack(fill="x", pady=16)
+    ttk.Label(box, text="Rilis Update", style="H2.TLabel").pack()
+    ttk.Label(box, text="Tandatangani file Setup baru supaya aplikasi di cabang mau memasangnya.",
+              style="Muted.TLabel", wraplength=560).pack(pady=(4, 8))
+    ui.Button(box, "Pilih file Setup", "upload", release).pack()
+    ttk.Label(box, textvariable=release_msg, style="Muted.TLabel", wraplength=560, justify="center").pack(pady=6)
     refresh()
     return root
 
@@ -141,5 +167,7 @@ if __name__ == "__main__":
         gui().mainloop()
     elif sys.argv[1] == "init":
         init()
+    elif sys.argv[1] == "release" and len(sys.argv) == 3:
+        print("Dibuat:", updater.write_manifest(load_key(KEY_FILE), sys.argv[2]))
     else:
         print(make_code(load_key(KEY_FILE), sys.argv[1]))

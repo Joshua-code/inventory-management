@@ -3,7 +3,7 @@
 File (.rptdb, JSON):
   salt  - random, for username ids
   keys  - {HMAC(salt, username): master key wrapped with scrypt(password), AAD=username}
-  data  - AES-256-GCM(master key, {"file", "items", "users": {username: [perms]}})
+  data  - AES-256-GCM(master key, {"file", "imported", "items", "users": {username: [perms]}})
   file, imported - last imported Excel name + date, plain text so the login page can show it
 Usernames, access rights and items are unreadable without a valid password, even
 with the source code; access can't be edited because it lives inside the encrypted data.
@@ -99,7 +99,7 @@ class Store:
         self.logout()
 
     def logout(self):
-        self.key = self.user = self.source = self.mtime = None
+        self.key = self.user = self.source = self.imported = self.mtime = None
         self.items, self.users, self.perms = {}, {}, []
 
     def exists(self):
@@ -127,8 +127,10 @@ class Store:
         blob = bytes.fromhex(doc["data"])
         return json.loads(AESGCM(key).decrypt(blob[:12], blob[12:], None))
 
-    def _load(self, data):
+    def _load(self, data, doc):
         self.items, self.source = data["items"], data["file"]
+        # encrypted copy is authoritative; the plaintext header only covers databases imported before it existed
+        self.imported = data.get("imported") or doc.get("imported")
         self.users = {name: _perms(v) for name, v in data["users"].items()}
         self.perms = self.users.get(self.user, [])
 
@@ -137,7 +139,7 @@ class Store:
         doc["data"] = (nonce + AESGCM(self.key).encrypt(nonce, json.dumps(data).encode(), None)).hex()
         _write(self.path, json.dumps(doc).encode())
         self.mtime = os.path.getmtime(self.path)
-        self._load(data)
+        self._load(data, doc)
 
     def _wrap(self, doc, username, password):
         salt, nonce = os.urandom(16), os.urandom(12)
@@ -170,7 +172,7 @@ class Store:
         if not _perms(data["users"].get(username)):  # deleted user
             return None
         self.key, self.user, self.mtime = key, username, mtime
-        self._load(data)
+        self._load(data, doc)
         return self.perms
 
     def reload_if_changed(self):
@@ -181,12 +183,13 @@ class Store:
         mtime = os.path.getmtime(self.path)
         if mtime == self.mtime:
             return False
-        data = self._decrypt(self._read(), self.key)
+        doc = self._read()
+        data = self._decrypt(doc, self.key)
         if not _perms(data["users"].get(self.user)):
             self.logout()
             raise AccessRevoked("Akses Anda telah dihapus. Silakan hubungi admin.")
         self.mtime = mtime
-        self._load(data)
+        self._load(data, doc)
         return True
 
     def _require(self, perm):
@@ -252,9 +255,11 @@ class Store:
         items = parse_excel(path)  # raises before anything is replaced
         name = os.path.basename(path)
 
+        stamp = datetime.now().strftime("%d/%m/%Y %H:%M")
+
         def change(doc, data):
-            data.update(items=items, file=name)
-            doc.update(file=name, imported=datetime.now().strftime("%d/%m/%Y %H:%M"))
+            data.update(items=items, file=name, imported=stamp)
+            doc.update(file=name, imported=stamp)  # plaintext copy: the login page shows it before login
 
         self._update("update", change)
         return len(items)

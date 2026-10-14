@@ -35,6 +35,8 @@ jobs:
           $v = python -c "import ui; print(ui.VERSION)"
           & $iscc "/DMyVersion=$v" installer.iss
           if ($LASTEXITCODE) { exit 1 }
+          & $iscc "/DMyVersion=9.9.9" "/O$env:RUNNER_TEMP\upgrade" installer.iss   # only for the upgrade check below
+          if ($LASTEXITCODE) { exit 1 }
       - name: Install / uninstall check (database must survive)
         shell: pwsh
         run: |
@@ -46,6 +48,14 @@ jobs:
           New-Item -ItemType Directory -Force $data | Out-Null
           Set-Content "$data\config.json" '{}'; Set-Content "$data\license.txt" 'x'; Set-Content "$data\inside.rptdb" 'db'
           $outside = "$env:RUNNER_TEMP\outside.rptdb"; Set-Content $outside 'db'
+          # in-place upgrade (what an in-app update does): newer version installed, nothing of the user's touched
+          $up = (Get-ChildItem "$env:RUNNER_TEMP\upgrade\*Setup*.exe")[0].FullName
+          Start-Process $up -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS' -Wait
+          $reg = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{8C1F2B7E-6D3A-4E59-9B1C-2F7A4D5E6C01}_is1"
+          if ((Get-ItemProperty $reg).DisplayVersion -ne '9.9.9') { throw "upgrade did not install the new version" }
+          if (!(Test-Path "$app\Retail Price Tag Management.exe")) { throw "app missing after upgrade" }
+          foreach ($f in 'config.json','license.txt','inside.rptdb') { if (!(Test-Path "$data\$f")) { throw "upgrade removed $f" } }
+          "upgrade OK: 9.9.9 installed over the old version, config/license/database kept"
           Start-Process "$app\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
           for ($i = 0; $i -lt 60 -and (Test-Path $app); $i++) { Start-Sleep 1 }  # uninstaller finishes from a temp copy
           if (Test-Path $app) { throw "app folder not removed" }
@@ -55,6 +65,12 @@ jobs:
       - name: Sizes
         shell: pwsh
         run: Get-ChildItem dist -File | ForEach-Object { "{0,8:N1} MB  {1}" -f ($_.Length / 1MB), $_.Name }
+      - name: Icon font preview (temporary check)
+        run: python -c "from PIL import Image, ImageDraw, ImageFont; import ui; f = ImageFont.truetype('C:/Windows/Fonts/segmdl2.ttf', 28); names = ['settings', 'download', 'folder']; im = Image.new('RGB', (130 * len(names), 70), 'white'); d = ImageDraw.Draw(im); [(d.text((130 * i + 50, 8), ui.ICONS[n], font=f, fill='black'), d.text((130 * i + 10, 50), n, fill='black')) for i, n in enumerate(names)]; im.save('dist/icons.png')"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: icons-preview
+          path: dist/icons.png
       - uses: actions/upload-artifact@v4
         with:
           name: Retail Price Tag Management Setup

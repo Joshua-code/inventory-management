@@ -6,7 +6,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 FONT = "Segoe UI"
 ICON_FONT = "Segoe MDL2 Assets"  # built into Windows 10/11; buttons fall back to text-only without it
 RED, RED_DARK = "#D6232A", "#A8181E"
@@ -17,6 +17,7 @@ ICONS = {
     "add": "\uE710", "adduser": "\uE8FA", "delete": "\uE74D", "save": "\uE74E",
     "copy": "\uE8C8", "folder": "\uE838", "open": "\uE8E5", "switch": "\uE8AB",
     "login": "\uE72A", "logout": "\uE7E8", "key": "\uE8D7",
+    "settings": "\uE713", "download": "\uE896",
 }
 
 
@@ -65,7 +66,7 @@ class Button(tk.Frame):
         super().__init__(parent, bg=bg, cursor="hand2")
         self.command = command
         parts = []
-        if icon and self.winfo_toplevel().has_icons:
+        if icon and self._root().has_icons:
             parts.append(tk.Label(self, text=ICONS[icon], font=(ICON_FONT, 12), bg=bg, fg=fg))
         weight = "bold" if kind in ("primary", "nav_on") else "normal"
         parts.append(tk.Label(self, text=text, font=(FONT, 10, weight), bg=bg, fg=fg))

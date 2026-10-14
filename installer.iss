@@ -21,6 +21,8 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
+; in-app updates relaunch the app themselves (see [Run]), so Setup must not restart it too
+RestartApplications=no
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
@@ -34,9 +36,17 @@ Name: "{autodesktop}\{#MyApp}"; Filename: "{app}\{#MyExe}"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#MyExe}"; Description: "{cm:LaunchProgram,{#MyApp}}"; Flags: nowait postinstall skipifsilent
+; In-app update: the app starts Setup with /RELAUNCH=1, so reopen it when done
+Filename: "{app}\{#MyExe}"; Flags: nowait; Check: Relaunch
 
 [UninstallDelete]
 ; App settings only, by exact name. Database files (.rptdb) are never touched, wherever they are.
 Type: files; Name: "{userappdata}\RetailPriceTagManagement\config.json"
 Type: files; Name: "{userappdata}\RetailPriceTagManagement\license.txt"
 Type: dirifempty; Name: "{userappdata}\RetailPriceTagManagement"
+
+[Code]
+function Relaunch: Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
+end;
